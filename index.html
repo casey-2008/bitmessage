@@ -1226,13 +1226,19 @@ async function sendMessage() {
     const psbtBytes = await buildPSBT(utxos, recipient, amount, opReturnScript);
     const psbtHex   = bytesToHex(psbtBytes);
 
-    let signedHex;
+    let signedRaw;
     if (STATE.wallet.type === 'unisat') {
-      signedHex = await window.unisat.signPsbt(psbtHex, { autoFinalized: true });
+      signedRaw = await window.unisat.signPsbt(psbtHex, { autoFinalized: true });
     } else {
       const prov = window.opnet || window.opwallet;
-      signedHex  = await prov.signPsbt(psbtHex, { autoFinalized: true });
+      signedRaw  = await prov.signPsbt(psbtHex, { autoFinalized: true });
     }
+
+    // Normalize — UniSat may return string, object {psbtHex}, or object {txHex}
+    console.log('signPsbt result:', typeof signedRaw, signedRaw);
+    const signedHex = normalizeSignedResult(signedRaw);
+    console.log('normalized signedHex:', signedHex ? signedHex.slice(0,40) + '...' : 'null');
+    if (!signedHex) throw new Error('Wallet returned empty result after signing');
 
     stepDone(2); stepActive(3);
 
@@ -1329,21 +1335,59 @@ async function getUtxos(address) {
 /* ═══════════════════════════════════════════════════
    BROADCAST
 ═══════════════════════════════════════════════════ */
+// Normalize whatever signPsbt returns into a hex string
+function normalizeSignedResult(raw) {
+  if (!raw) return null;
+  // Already a hex string
+  if (typeof raw === 'string') return raw;
+  // Object with common key names
+  if (typeof raw === 'object') {
+    const val = raw.txHex || raw.rawtx || raw.tx || raw.psbtHex || raw.hex || raw.result;
+    if (typeof val === 'string') return val;
+  }
+  // Uint8Array or Buffer
+  if (raw instanceof Uint8Array || Buffer && raw instanceof Buffer) {
+    return bytesToHex(raw);
+  }
+  return String(raw);
+}
+
 async function broadcastTx(hex) {
-  // Strip PSBT magic if needed
+  if (typeof hex !== 'string') hex = String(hex);
+
+  // Still a signed PSBT — let the wallet push it
   if (hex.startsWith('70736274')) {
-    // Try wallet broadcast
+    console.log('Broadcasting as PSBT via wallet pushTx...');
     if (STATE.wallet.type === 'unisat') {
-      return await window.unisat.pushTx({ rawtx: hex });
+      const result = await window.unisat.pushTx({ rawtx: hex });
+      return typeof result === 'string' ? result : (result.txid || result.tx || JSON.stringify(result));
     }
     const prov = window.opnet || window.opwallet;
-    return await prov.pushTx({ rawtx: hex });
+    const result = await prov.pushTx({ rawtx: hex });
+    return typeof result === 'string' ? result : (result.txid || result.tx || JSON.stringify(result));
   }
 
-  const r = await fetch('https://blockstream.info/testnet/api/tx', {
-    method:'POST', body: hex, headers:{'Content-Type':'text/plain'}
+  // Raw tx — broadcast via Blockstream
+  console.log('Broadcasting raw tx via Blockstream...');
+  const base = NETWORK === 'testnet'
+    ? 'https://blockstream.info/testnet/api/tx'
+    : 'https://blockstream.info/api/tx';
+  const r = await fetch(base, {
+    method: 'POST', body: hex, headers: { 'Content-Type': 'text/plain' }
   });
-  if (!r.ok) throw new Error('Broadcast failed: ' + await r.text());
+  if (!r.ok) {
+    const errText = await r.text();
+    // Fallback: try mempool.space
+    console.warn('Blockstream broadcast failed:', errText, '— trying mempool.space');
+    const base2 = NETWORK === 'testnet'
+      ? 'https://mempool.space/testnet/api/tx'
+      : 'https://mempool.space/api/tx';
+    const r2 = await fetch(base2, {
+      method: 'POST', body: hex, headers: { 'Content-Type': 'text/plain' }
+    });
+    if (!r2.ok) throw new Error('Broadcast failed: ' + errText);
+    return await r2.text();
+  }
   return await r.text();
 }
 
@@ -1675,64 +1719,4 @@ function encodeVarInt(n) {
   const b=new Uint8Array(5); b[0]=0xfe; new DataView(b.buffer).setUint32(1,n,true); return b;
 }
 function uint32LE(n) {
-  const b = new Uint8Array(4);
-  new DataView(b.buffer).setUint32(0, n >>> 0, true);
-  return b;
-}
-
-/* ═══════════════════════════════════════════════════
-   NOTIFICATIONS
-═══════════════════════════════════════════════════ */
-function notify(title, sub, type='info') {
-  const icons = { success:'✓', error:'✕', warning:'⚠', info:'ℹ' };
-  const wrap  = document.getElementById('notifWrap');
-  const el    = document.createElement('div');
-  el.className = `notif ${type}`;
-  el.innerHTML = `<div class="notif-icon">${icons[type]}</div>
-    <div><div class="notif-text">${title}</div>${sub ? `<div class="notif-sub">${sub}</div>` : ''}</div>`;
-  wrap.appendChild(el);
-  setTimeout(() => {
-    el.style.opacity = '0'; el.style.transform = 'translateX(20px)';
-    el.style.transition = 'all 0.3s';
-    setTimeout(() => el.remove(), 300);
-  }, 4000);
-}
-
-/* ═══════════════════════════════════════════════════
-   UTILS
-═══════════════════════════════════════════════════ */
-function truncate(str, n=12) {
-  if (!str) return '—';
-  if (str.length <= n*2+3) return str;
-  return str.slice(0,n) + '...' + str.slice(-6);
-}
-function timeAgo(ts) {
-  const s = Math.floor((Date.now()-ts)/1000);
-  if (s<60) return 'just now';
-  if (s<3600) return Math.floor(s/60)+'m ago';
-  if (s<86400) return Math.floor(s/3600)+'h ago';
-  return Math.floor(s/86400)+'d ago';
-}
-function escHtml(str) {
-  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-/* ═══════════════════════════════════════════════════
-   INIT
-═══════════════════════════════════════════════════ */
-async function init() {
-  // Run independently — wallet connect must not depend on these
-  fetchBlock().catch(console.error);
-  setInterval(fetchBlock, 30000);
-
-  fetchFeeRate().catch(console.error);
-  setInterval(fetchFeeRate, 60000);
-
-  loadMessages();
-  updatePreview();
-}
-
-init();
-</script>
-</body>
-</html>
+  const b = ne

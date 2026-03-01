@@ -1719,4 +1719,64 @@ function encodeVarInt(n) {
   const b=new Uint8Array(5); b[0]=0xfe; new DataView(b.buffer).setUint32(1,n,true); return b;
 }
 function uint32LE(n) {
-  const b = ne
+  const b = new Uint8Array(4);
+  new DataView(b.buffer).setUint32(0, n >>> 0, true);
+  return b;
+}
+
+/* ═══════════════════════════════════════════════════
+   NOTIFICATIONS
+═══════════════════════════════════════════════════ */
+function notify(title, sub, type='info') {
+  const icons = { success:'✓', error:'✕', warning:'⚠', info:'ℹ' };
+  const wrap  = document.getElementById('notifWrap');
+  const el    = document.createElement('div');
+  el.className = `notif ${type}`;
+  el.innerHTML = `<div class="notif-icon">${icons[type]}</div>
+    <div><div class="notif-text">${title}</div>${sub ? `<div class="notif-sub">${sub}</div>` : ''}</div>`;
+  wrap.appendChild(el);
+  setTimeout(() => {
+    el.style.opacity = '0'; el.style.transform = 'translateX(20px)';
+    el.style.transition = 'all 0.3s';
+    setTimeout(() => el.remove(), 300);
+  }, 4000);
+}
+
+/* ═══════════════════════════════════════════════════
+   UTILS
+═══════════════════════════════════════════════════ */
+function truncate(str, n=12) {
+  if (!str) return '—';
+  if (str.length <= n*2+3) return str;
+  return str.slice(0,n) + '...' + str.slice(-6);
+}
+function timeAgo(ts) {
+  const s = Math.floor((Date.now()-ts)/1000);
+  if (s<60) return 'just now';
+  if (s<3600) return Math.floor(s/60)+'m ago';
+  if (s<86400) return Math.floor(s/3600)+'h ago';
+  return Math.floor(s/86400)+'d ago';
+}
+function escHtml(str) {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+/* ═══════════════════════════════════════════════════
+   INIT
+═══════════════════════════════════════════════════ */
+async function init() {
+  // Run independently — wallet connect must not depend on these
+  fetchBlock().catch(console.error);
+  setInterval(fetchBlock, 30000);
+
+  fetchFeeRate().catch(console.error);
+  setInterval(fetchFeeRate, 60000);
+
+  loadMessages();
+  updatePreview();
+}
+
+init();
+</script>
+</body>
+</html>

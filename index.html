@@ -598,6 +598,7 @@ textarea.field-input.encrypted-mode {
 <nav>
   <div class="nav-tab active" onclick="showPage('send', this)">Send</div>
   <div class="nav-tab" onclick="showPage('inbox', this)">Inbox</div>
+  <div class="nav-tab" onclick="showPage('explorer', this)">Explorer</div>
   <div class="nav-tab" onclick="showPage('about', this)">How It Works</div>
 </nav>
 
@@ -814,6 +815,36 @@ textarea.field-input.encrypted-mode {
       </div>
     </div>
   </div>
+
+</div>
+
+
+<!-- ═══════════════════════
+     EXPLORER PAGE
+════════════════════════ -->
+<div class="page" id="page-explorer">
+
+  <div class="sec-head">
+    <span class="sec-title">Message Explorer</span>
+  </div>
+
+  <div class="form-panel" style="margin-bottom:32px;">
+    <div class="field">
+      <label class="field-label">Bitcoin Address or TXID</label>
+      <div style="display:flex;gap:12px;">
+        <input type="text" class="field-input" id="explorerInput"
+          placeholder="tb1q... or txid hex"
+          style="flex:1;"
+          onkeydown="if(event.key==='Enter') explorerSearch()">
+        <button class="btn-primary" style="width:auto;padding:12px 24px;" onclick="explorerSearch()">
+          Search →
+        </button>
+      </div>
+      <div class="field-hint" id="explorerHint">Enter a Bitcoin address to see all messages sent to it, or a TXID to inspect a specific transaction.</div>
+    </div>
+  </div>
+
+  <div id="explorerResults"></div>
 
 </div>
 
@@ -2104,6 +2135,211 @@ function escHtml(str) {
 /* ═══════════════════════════════════════════════════
    INIT
 ═══════════════════════════════════════════════════ */
+
+/* ═══════════════════════════════════════════════════
+   EXPLORER
+═══════════════════════════════════════════════════ */
+
+async function explorerSearch() {
+  const raw   = document.getElementById('explorerInput').value.trim();
+  const hint  = document.getElementById('explorerHint');
+  const res   = document.getElementById('explorerResults');
+
+  if (!raw) { hint.textContent = 'Enter an address or TXID.'; hint.style.color='var(--red)'; return; }
+  hint.textContent = 'Searching...'; hint.style.color = 'var(--muted)';
+  res.innerHTML = '<div class="empty"><span class="empty-icon" style="animation:blink 1s infinite">⬡</span>Fetching from blockchain...</div>';
+
+  try {
+    // Detect: 64-char hex = TXID, otherwise address
+    const isTxid = /^[0-9a-fA-F]{64}$/.test(raw);
+    let messages = [];
+
+    if (isTxid) {
+      const msg = await fetchTxMessage(raw);
+      if (msg) messages = [msg];
+      else {
+        res.innerHTML = '<div class="empty"><span class="empty-icon">✉</span>No BitMessage found in this transaction.</div>';
+        hint.textContent = 'Transaction found but contains no BitMessage OP_RETURN.';
+        return;
+      }
+    } else {
+      // Address: fetch all txs and scan each
+      messages = await fetchAddressMessages(raw);
+    }
+
+    hint.textContent = `Found ${messages.length} message${messages.length !== 1 ? 's' : ''}.`;
+    hint.style.color = messages.length ? 'var(--green)' : 'var(--muted)';
+    renderExplorerResults(messages, raw);
+
+  } catch(e) {
+    console.error('[Explorer]', e);
+    hint.textContent = 'Error: ' + e.message;
+    hint.style.color = 'var(--red)';
+    res.innerHTML = '<div class="empty"><span class="empty-icon">✕</span>' + e.message + '</div>';
+  }
+}
+
+// Fetch all transactions for an address and extract BitMessages
+async function fetchAddressMessages(address) {
+  const base = NETWORK === 'testnet'
+    ? 'https://blockstream.info/testnet/api'
+    : 'https://blockstream.info/api';
+
+  // Get tx list
+  const r = await fetch(`${base}/address/${address}/txs`);
+  if (!r.ok) throw new Error('Could not fetch transactions for address');
+  const txs = await r.json();
+
+  const messages = [];
+  // Process up to 50 most recent txs
+  for (const tx of txs.slice(0, 50)) {
+    const msg = await parseTxForMessage(tx, address);
+    if (msg) messages.push(msg);
+  }
+  return messages.sort((a, b) => b.ts - a.ts);
+}
+
+// Fetch a single TX and extract BitMessage
+async function fetchTxMessage(txid) {
+  const base = NETWORK === 'testnet'
+    ? 'https://blockstream.info/testnet/api'
+    : 'https://blockstream.info/api';
+
+  const r = await fetch(`${base}/tx/${txid}`);
+  if (!r.ok) throw new Error('Transaction not found');
+  const tx = await r.json();
+  return parseTxForMessage(tx, null);
+}
+
+// Parse a tx object from Blockstream API, extract BitMessage if present
+function parseTxForMessage(tx, filterAddress) {
+  // Find OP_RETURN output
+  for (const vout of tx.vout) {
+    const script = vout.scriptpubkey; // hex string
+    if (!script || !script.startsWith('6a')) continue; // OP_RETURN = 0x6a
+
+    const scriptBytes = hexToBytes(script);
+    // scriptBytes[0] = 0x6a (OP_RETURN)
+    // scriptBytes[1] = push length
+    if (scriptBytes.length < 3) continue;
+    const pushLen  = scriptBytes[1];
+    const payload  = scriptBytes.slice(2, 2 + pushLen);
+
+    // Check BITMSG magic: 42 49 54 4d 53 47
+    if (payload.length < 9) continue;
+    const magic = String.fromCharCode(...payload.slice(0, 6));
+    if (magic !== 'BITMSG') continue;
+
+    const version = payload[6]; // 0x01
+    const msgType = payload[7]; // 0x00 = public, 0x01 = encrypted
+    const msgBytes = payload.slice(8);
+
+    // Find sender (first input address) and recipient
+    const sender    = tx.vin[0]?.prevout?.scriptpubkey_address || '?';
+    const recipient = tx.vout.find(o => o.scriptpubkey_type !== 'op_return' && o.value > 0)
+                        ?.scriptpubkey_address || '?';
+    const amount    = tx.vout.find(o => o.scriptpubkey_type !== 'op_return' && o.value > 0)
+                        ?.value || 0;
+
+    // Skip if filtering by address and neither sender nor recipient match
+    if (filterAddress && sender !== filterAddress && recipient !== filterAddress) continue;
+
+    let msgText = '';
+    let isEnc   = msgType === 0x01;
+    if (!isEnc) {
+      msgText = new TextDecoder().decode(msgBytes);
+    } else {
+      msgText = bytesToHex(msgBytes); // raw encrypted bytes as hex
+    }
+
+    return {
+      txid:      tx.txid,
+      sender,
+      recipient,
+      amount,
+      msgType:   isEnc ? 'encrypted' : 'public',
+      msgText,
+      ts:        tx.status?.block_time ? tx.status.block_time * 1000 : Date.now(),
+      confirmed: tx.status?.confirmed || false,
+      blockHeight: tx.status?.block_height || null,
+    };
+  }
+  return null;
+}
+
+function renderExplorerResults(messages, query) {
+  const res = document.getElementById('explorerResults');
+  if (!messages.length) {
+    res.innerHTML = '<div class="empty"><span class="empty-icon">✉</span>No BitMessages found.</div>';
+    return;
+  }
+
+  res.innerHTML = messages.map((m, i) => `
+    <div class="msg-row" style="animation-delay:${i*40}ms;cursor:default;">
+      <div class="mr-indicator ${m.msgType}"></div>
+      <div class="mr-body" style="min-width:0;">
+        <div class="mr-addr" style="margin-bottom:6px;">
+          <span style="color:var(--muted)">From:</span>
+          <span style="color:${m.sender===query?'var(--gold)':'var(--muted2)'}">${truncate(m.sender,14)}</span>
+          &nbsp;→&nbsp;
+          <span style="color:var(--muted)">To:</span>
+          <span style="color:${m.recipient===query?'var(--gold)':'var(--muted2)'}">${truncate(m.recipient,14)}</span>
+        </div>
+        ${m.msgType === 'encrypted'
+          ? `<div class="mr-msg enc">
+               🔐 <span>[encrypted]</span>
+               <input type="text" placeholder="Paste decryption key..." id="decKey_${i}"
+                 style="font-size:10px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:3px 8px;outline:none;width:280px;font-family:DM Mono,monospace;">
+               <button onclick="explorerDecrypt(${i},'${encodeURIComponent(m.msgText)}')"
+                 style="font-size:9px;padding:3px 10px;border:1px solid var(--amber);color:var(--amber);background:none;cursor:pointer;letter-spacing:0.1em;">
+                 Decrypt
+               </button>
+               <span id="decResult_${i}" style="font-size:11px;color:var(--text);"></span>
+             </div>`
+          : `<div class="mr-msg" style="font-family:'Playfair Display',serif;font-style:italic;">
+               "${escHtml(m.msgText)}"
+             </div>`
+        }
+        <div style="margin-top:6px;font-size:9px;color:var(--muted);">
+          <a href="${NETWORK==='testnet'?'https://blockstream.info/testnet':'https://blockstream.info'}/tx/${m.txid}"
+             target="_blank" class="txid-link">${truncate(m.txid,14)}</a>
+          &nbsp;·&nbsp;
+          ${m.confirmed
+            ? `<span style="color:var(--green)">✓ Block #${m.blockHeight}</span>`
+            : `<span style="color:var(--amber)">⏳ Unconfirmed</span>`}
+        </div>
+      </div>
+      <div class="mr-meta">
+        <span class="mr-amount">${m.amount.toLocaleString()} sats</span>
+        <span class="mr-time">${m.ts ? timeAgo(m.ts) : '—'}</span>
+        <span class="mr-status ${m.confirmed?'confirmed':'pending'}">${m.confirmed?'confirmed':'pending'}</span>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function explorerDecrypt(idx, encHex) {
+  const keyInput = document.getElementById(`decKey_${idx}`);
+  const result   = document.getElementById(`decResult_${idx}`);
+  const key      = keyInput ? keyInput.value.trim() : '';
+  if (!key) { result.textContent = 'Enter key'; result.style.color='var(--red)'; return; }
+
+  try {
+    const encBytes = hexToBytes(decodeURIComponent(encHex));
+    const rawKey   = hexToBytes(key);
+    const cryptoKey = await crypto.subtle.importKey('raw', rawKey, 'AES-GCM', false, ['decrypt']);
+    const iv        = encBytes.slice(0, 12);
+    const cipher    = encBytes.slice(12);
+    const plain     = await crypto.subtle.decrypt({ name:'AES-GCM', iv }, cryptoKey, cipher);
+    const text      = new TextDecoder().decode(plain);
+    result.innerHTML = `&nbsp;✓ <span style="font-family:'Playfair Display',serif;font-style:italic;">"${escHtml(text)}"</span>`;
+    result.style.color = 'var(--green)';
+  } catch(e) {
+    result.textContent = ' ✕ Wrong key';
+    result.style.color = 'var(--red)';
+  }
+}
+
 async function init() {
   // Run independently — wallet connect must not depend on these
   fetchBlock().catch(console.error);

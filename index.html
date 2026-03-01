@@ -563,6 +563,8 @@ textarea.field-input.encrypted-mode {
   .how-grid { grid-template-columns:1fr; }
 }
 </style>
+<!-- Bitcoin libs -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bitcoinjs-lib/5.2.0/bitcoinjs-lib.min.js"></script>
 </head>
 <body>
 <div class="app">
@@ -1589,15 +1591,13 @@ function closeModal() {
 /* ═══════════════════════════════════════════════════
    PSBT BUILDER (P2WPKH standard)
 ═══════════════════════════════════════════════════ */
-// buildPsbtHex — builds PSBT and returns a lowercase hex STRING (what UniSat expects)
+// buildPsbtHex — uses bitcoinjs-lib for correct PSBT construction
 async function buildPsbtHex(utxos, toAddress, amountSats, opReturnScript, feeRate) {
-  const PSBT_MAGIC = new Uint8Array([0x70, 0x73, 0x62, 0x74, 0xff]);
-
   const selfAddr = String(STATE.wallet.address).trim();
   const FEE      = Math.ceil((feeRate || STATE.feeRate || 2) * ESTIMATED_TX_VBYTES);
   const need     = amountSats + FEE;
 
-  console.log('[BitMessage] buildPsbtHex — addr:', selfAddr, 'to:', toAddress, 'amt:', amountSats, 'fee:', FEE);
+  console.log('[BitMessage] buildPsbtHex — from:', selfAddr, 'to:', toAddress, 'amt:', amountSats, 'fee:', FEE);
 
   // Coin selection
   let selected = [], totalIn = 0;
@@ -1606,69 +1606,125 @@ async function buildPsbtHex(utxos, toAddress, amountSats, opReturnScript, feeRat
     totalIn += u.value;
     if (totalIn >= need) break;
   }
-  if (totalIn < need) throw new Error(`Insufficient funds: have ${totalIn} sats, need ${need} (amount + fee)`);
-
+  if (totalIn < need) throw new Error(`Insufficient funds: have ${totalIn} sats, need ${need}`);
   const changeAmt = totalIn - amountSats - FEE;
 
-  // Outputs
+  // Use bitcoinjs-lib if available, otherwise fall back to manual
+  if (typeof bitcoin !== 'undefined' && bitcoin.Psbt) {
+    console.log('[BitMessage] Using bitcoinjs-lib Psbt');
+    const network = NETWORK === 'testnet' ? bitcoin.networks.testnet : bitcoin.networks.bitcoin;
+    const psbt = new bitcoin.Psbt({ network });
+
+    // Inputs
+    for (const u of selected) {
+      psbt.addInput({
+        hash: u.txid,
+        index: u.vout,
+        witnessUtxo: {
+          script: bitcoin.address.toOutputScript(selfAddr, network),
+          value: u.value,
+        },
+      });
+    }
+
+    // Outputs
+    psbt.addOutput({ address: String(toAddress).trim(), value: amountSats });
+
+    if (opReturnScript) {
+      psbt.addOutput({ script: Buffer.from(opReturnScript), value: 0 });
+    }
+
+    if (changeAmt >= 546) {
+      psbt.addOutput({ address: selfAddr, value: changeAmt });
+    }
+
+    const hex = psbt.toHex();
+    console.log('[BitMessage] bitcoinjs PSBT hex starts:', hex.slice(0, 16));
+    return hex;
+
+  } else {
+    // Manual fallback (pure JS)
+    console.log('[BitMessage] bitcoinjs not available, using manual PSBT builder');
+    return buildPsbtManual(selected, toAddress, amountSats, opReturnScript, changeAmt, selfAddr);
+  }
+}
+
+function buildPsbtManual(selected, toAddress, amountSats, opReturnScript, changeAmt, selfAddr) {
+  // PSBT v0 structure (BIP174)
+  // Magic: 70736274ff
+  // Global map: key 0x00 = unsigned tx
+  // Input maps: key 0x01 = witness_utxo
+  // Output maps: empty
+
+  const w = (bytes) => { // write with varint length prefix
+    return concat([encodeVarInt(bytes.length), bytes]);
+  };
+
+  const selfScript = p2wpkhScript(selfAddr);
+
+  // Build unsigned tx
+  const ver  = uint32LE(2);
+  const lt   = uint32LE(0);
+  const seq  = uint32LE(0xffffffff);
+
+  const txIns  = selected.map(u => concat([hexToBytes(u.txid).reverse(), uint32LE(u.vout), new Uint8Array([0x00]), seq]));
   const outputs = [];
-  outputs.push({ value: amountSats, script: addressToScriptPubKey(String(toAddress).trim()) });
-  if (opReturnScript) outputs.push({ value: 0, script: opReturnScript });
-  if (changeAmt >= 546) outputs.push({ value: changeAmt, script: addressToScriptPubKey(selfAddr) });
+  outputs.push(buildTxOutputBytes(amountSats, p2wpkhScript(String(toAddress).trim())));
+  if (opReturnScript) outputs.push(buildTxOutputBytes(0, opReturnScript));
+  if (changeAmt >= 546) outputs.push(buildTxOutputBytes(changeAmt, selfScript));
 
-  // Unsigned tx
-  const version  = uint32LE(2);
-  const locktime = uint32LE(0);
-  const seq      = uint32LE(0xffffffff);
-
-  const rawIns  = selected.map(u =>
-    concat([hexToBytes(u.txid).reverse(), uint32LE(u.vout), new Uint8Array([0x00]), seq])
-  );
-  const rawOuts = outputs.map(o => buildTxOutputBytes(o.value, o.script));
-  const rawTx   = concat([
-    version,
-    encodeVarInt(rawIns.length), ...rawIns,
-    encodeVarInt(rawOuts.length), ...rawOuts,
-    locktime,
+  const unsignedTx = concat([
+    ver,
+    encodeVarInt(txIns.length), ...txIns,
+    encodeVarInt(outputs.length), ...outputs,
+    lt,
   ]);
 
-  // PSBT assembly
-  // Global: unsigned tx
-  const globalTxKey = new Uint8Array([0x01, 0x00]);
-  const globalTxVal = encodeVarInt(rawTx.length);
-
   const parts = [];
-  parts.push(PSBT_MAGIC);
-  // Global map: key=0x00 (unsigned tx)
-  parts.push(encodeVarInt(globalTxKey.length)); parts.push(globalTxKey);
-  parts.push(encodeVarInt(rawTx.length));       parts.push(rawTx);
-  parts.push(new Uint8Array([0x00])); // end global map
+  // Magic
+  parts.push(new Uint8Array([0x70, 0x73, 0x62, 0x74, 0xff]));
+  // Global: unsigned tx (key=0x00, 1 byte key)
+  parts.push(new Uint8Array([0x01, 0x00]));   // key length=1, key=0x00
+  parts.push(w(unsignedTx));                   // value = varint(len) + tx
+  parts.push(new Uint8Array([0x00]));           // end global map
 
-  // Per-input maps: WITNESS_UTXO (key type 0x01)
-  const selfScript = addressToScriptPubKey(selfAddr);
+  // Per-input: witness_utxo (key type=0x01)
   for (const u of selected) {
-    const witnessUtxoVal = buildTxOutputBytes(u.value, selfScript);
-    const witnessUtxoKey = new Uint8Array([0x01]);
-    parts.push(encodeVarInt(witnessUtxoKey.length)); parts.push(witnessUtxoKey);
-    parts.push(encodeVarInt(witnessUtxoVal.length)); parts.push(witnessUtxoVal);
-    parts.push(new Uint8Array([0x00])); // end input map
+    const witUtxo = buildTxOutputBytes(u.value, selfScript);
+    parts.push(new Uint8Array([0x01, 0x01]));  // key length=1, key=0x01
+    parts.push(w(witUtxo));
+    parts.push(new Uint8Array([0x00]));          // end input map
   }
 
-  // Per-output maps: empty
-  for (let k = 0; k < outputs.length; k++) {
-    parts.push(new Uint8Array([0x00]));
-  }
+  // Per-output: all empty
+  for (let i = 0; i < outputs.length; i++) parts.push(new Uint8Array([0x00]));
 
-  // Concatenate all parts
-  const totalLen = parts.reduce((s, p) => s + p.length, 0);
+  const totalLen  = parts.reduce((s, p) => s + p.length, 0);
   const psbtBytes = new Uint8Array(totalLen);
-  let offset = 0;
-  for (const p of parts) { psbtBytes.set(p, offset); offset += p.length; }
+  let off = 0;
+  for (const p of parts) { psbtBytes.set(p, off); off += p.length; }
 
-  // Return as lowercase hex string — this is what UniSat signPsbt expects
   const hex = bytesToHex(psbtBytes);
-  console.log('[BitMessage] PSBT built, length:', hex.length / 2, 'bytes, starts:', hex.slice(0, 10));
+  console.log('[BitMessage] manual PSBT hex starts:', hex.slice(0, 16), 'len:', hex.length / 2);
   return hex;
+}
+
+// P2WPKH script from bech32 address (tb1q... or bc1q...)
+function p2wpkhScript(address) {
+  address = String(address).trim();
+  // If bitcoinjs available
+  if (typeof bitcoin !== 'undefined') {
+    const network = NETWORK === 'testnet' ? bitcoin.networks.testnet : bitcoin.networks.bitcoin;
+    try { return bitcoin.address.toOutputScript(address, network); } catch(e) {}
+  }
+  // Manual bech32 decode
+  const decoded = bech32Decode(address);
+  if (decoded) {
+    const { witVer, witProg } = decoded;
+    return new Uint8Array([witVer === 0 ? 0x00 : (0x50 + witVer), witProg.length, ...witProg]);
+  }
+  // base58
+  return addressToScriptPubKey(address);
 }
 
 /* ═══════════════════════════════════════════════════

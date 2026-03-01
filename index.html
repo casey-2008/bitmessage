@@ -854,7 +854,7 @@ const STATE = {
 };
 
 // TX size: 1 P2WPKH input + 2 outputs (recipient + change) + OP_RETURN ≈ 170 vB
-const ESTIMATED_TX_VBYTES = 170;
+const ESTIMATED_TX_VBYTES = 210; // 1 P2WPKH in + 3 outs (recipient+opreturn+change) + segwit overhead
 
 async function fetchFeeRate() {
   try {
@@ -1832,28 +1832,38 @@ function extractRawTxFromPsbt(psbt) {
   if (!rawTxBytes) throw new Error('No unsigned tx in PSBT');
   console.log('[BitMessage] unsigned tx bytes:', rawTxBytes.length);
 
-  // Parse unsigned tx
+  // Parse unsigned tx — use local vi2() that reads from rawTxBytes, not psbt
+  function vi2(buf, p) {
+    const b = buf[p];
+    if (b < 0xfd) return { v: b, n: 1 };
+    if (b === 0xfd) return { v: buf[p+1]|(buf[p+2]<<8), n: 3 };
+    return { v: buf[p+1]|(buf[p+2]<<8)|(buf[p+3]<<16)|(buf[p+4]<<24), n: 5 };
+  }
+
   let tp = 0;
   const txVersion = rawTxBytes.slice(tp, tp+4); tp += 4;
-  const inC = vi(tp); tp += inC.n;
+  const inC = vi2(rawTxBytes, tp); tp += inC.n;
   const nIns = inC.v;
   console.log('[BitMessage] nIns:', nIns);
+
+  if (nIns > 1000) throw new Error('Implausible nIns=' + nIns + ' — PSBT parse offset wrong');
 
   const rawIns = [];
   for (let k = 0; k < nIns; k++) {
     const s = tp;
     tp += 36; // txid(32)+vout(4)
-    const ssl = vi(tp); tp += ssl.n + ssl.v; // empty scriptSig
+    const ssl = vi2(rawTxBytes, tp); tp += ssl.n + ssl.v; // scriptSig (empty)
     tp += 4; // sequence
     rawIns.push(rawTxBytes.slice(s, tp));
   }
 
-  const outC = vi(tp); tp += outC.n;
+  const outC = vi2(rawTxBytes, tp); tp += outC.n;
   const nOuts = outC.v;
+  console.log('[BitMessage] nOuts:', nOuts);
   const outsStart = tp;
   for (let k = 0; k < nOuts; k++) {
-    tp += 8;
-    const ssl = vi(tp); tp += ssl.n + ssl.v;
+    tp += 8; // value
+    const ssl = vi2(rawTxBytes, tp); tp += ssl.n + ssl.v; // scriptPubKey
   }
   const rawOuts = rawTxBytes.slice(outsStart, tp);
   const txLocktime = rawTxBytes.slice(tp, tp+4);

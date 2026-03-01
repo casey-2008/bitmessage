@@ -665,7 +665,7 @@ textarea.field-input.encrypted-mode {
             <input type="number" class="field-input" id="f-amount" placeholder="e.g. 1000" min="546" oninput="updatePreview()" style="padding-right:70px;">
             <div class="amount-btc" id="amountBtc">≈ 0 BTC</div>
           </div>
-          <div class="field-hint">Minimum: 546 sats (dust limit) · Fee: ~2000 sats</div>
+          <div class="field-hint" id="feeHint">Fetching fee rate...</div>
         </div>
 
         <!-- Submit -->
@@ -849,8 +849,58 @@ const STATE = {
   wallet: null,
   msgType: 'public',
   encKey: null,
-  messages: [],  // local cache
+  messages: [],
+  feeRate: null,   // sat/vB — fetched from network
 };
+
+// TX size: 1 P2WPKH input + 2 outputs (recipient + change) + OP_RETURN ≈ 170 vB
+const ESTIMATED_TX_VBYTES = 170;
+
+async function fetchFeeRate() {
+  try {
+    const base = NETWORK === 'testnet'
+      ? 'https://mempool.space/testnet/api/v1/fees/recommended'
+      : 'https://mempool.space/api/v1/fees/recommended';
+    const r = await fetch(base);
+    if (r.ok) {
+      const fees = await r.json();
+      STATE.feeRate = fees.halfHourFee || fees.hourFee || fees.economyFee || 2;
+      updateFeeDisplay();
+      return STATE.feeRate;
+    }
+  } catch(_) {}
+  try {
+    const base2 = NETWORK === 'testnet'
+      ? 'https://blockstream.info/testnet/api/fee-estimates'
+      : 'https://blockstream.info/api/fee-estimates';
+    const r2 = await fetch(base2);
+    if (r2.ok) {
+      const fees2 = await r2.json();
+      STATE.feeRate = Math.ceil(fees2['6'] || fees2['3'] || 2);
+      updateFeeDisplay();
+      return STATE.feeRate;
+    }
+  } catch(_) {}
+  STATE.feeRate = 2;
+  updateFeeDisplay();
+  return 2;
+}
+
+function calcFee() {
+  return Math.ceil((STATE.feeRate || 2) * ESTIMATED_TX_VBYTES);
+}
+
+function updateFeeDisplay() {
+  const rate  = STATE.feeRate;
+  const total = calcFee();
+  const hint  = document.getElementById('feeHint');
+  if (hint) {
+    hint.innerHTML = rate
+      ? `Fee rate: <span style="color:var(--muted2)">${rate} sat/vB</span> · Est. fee: <span style="color:var(--muted2)">${total.toLocaleString()} sats</span> <span style="color:var(--muted)">(~${ESTIMATED_TX_VBYTES} vB)</span>`
+      : `Fetching fee rate...`;
+  }
+  updatePreview();
+}
 
 /* ═══════════════════════════════════════════════════
    NAVIGATION
@@ -1058,7 +1108,8 @@ function updatePreview() {
   document.getElementById('amountBtc').textContent = amount ? '≈ ' + btc : '≈ 0 BTC';
 
   // Total estimate
-  const total = amount ? (amount + 2000) : 0;
+  const estFee = calcFee();
+  const total = amount ? (amount + estFee) : 0;
   document.getElementById('prevTotal').textContent = total ? (total.toLocaleString() + ' sats') : '— sats';
 
   // Enable button?
@@ -1452,7 +1503,7 @@ function closeModal() {
 ═══════════════════════════════════════════════════ */
 async function buildPSBT(utxos, toAddress, amountSats, opReturnScript) {
   const PSBT_MAGIC = new Uint8Array([0x70, 0x73, 0x62, 0x74, 0xff]);
-  const FEE  = 2000;
+  const FEE  = calcFee();
   const need = amountSats + FEE;
 
   let selected = [], totalIn = 0;
@@ -1626,54 +1677,4 @@ function uint32LE(n) {
   return b;
 }
 
-/* ═══════════════════════════════════════════════════
-   NOTIFICATIONS
-═══════════════════════════════════════════════════ */
-function notify(title, sub, type='info') {
-  const icons = { success:'✓', error:'✕', warning:'⚠', info:'ℹ' };
-  const wrap  = document.getElementById('notifWrap');
-  const el    = document.createElement('div');
-  el.className = `notif ${type}`;
-  el.innerHTML = `<div class="notif-icon">${icons[type]}</div>
-    <div><div class="notif-text">${title}</div>${sub ? `<div class="notif-sub">${sub}</div>` : ''}</div>`;
-  wrap.appendChild(el);
-  setTimeout(() => {
-    el.style.opacity = '0'; el.style.transform = 'translateX(20px)';
-    el.style.transition = 'all 0.3s';
-    setTimeout(() => el.remove(), 300);
-  }, 4000);
-}
-
-/* ═══════════════════════════════════════════════════
-   UTILS
-═══════════════════════════════════════════════════ */
-function truncate(str, n=12) {
-  if (!str) return '—';
-  if (str.length <= n*2+3) return str;
-  return str.slice(0,n) + '...' + str.slice(-6);
-}
-function timeAgo(ts) {
-  const s = Math.floor((Date.now()-ts)/1000);
-  if (s<60) return 'just now';
-  if (s<3600) return Math.floor(s/60)+'m ago';
-  if (s<86400) return Math.floor(s/3600)+'h ago';
-  return Math.floor(s/86400)+'d ago';
-}
-function escHtml(str) {
-  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-/* ═══════════════════════════════════════════════════
-   INIT
-═══════════════════════════════════════════════════ */
-async function init() {
-  await fetchBlock();
-  setInterval(fetchBlock, 30000);
-  loadMessages();
-  updatePreview();
-}
-
-init();
-</script>
-</body>
-</html>
+/* ═══════════════════════════════

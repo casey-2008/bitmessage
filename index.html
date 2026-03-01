@@ -1246,84 +1246,47 @@ async function sendMessage() {
   }
 
   try {
-    // Step 1: build OP_RETURN payload (hex string for UniSat)
-    const opReturnPayload = await buildOpReturnPayload(msgText, isEnc);
-    // Convert to hex string — UniSat inscribeCommit expects hex
-    const opReturnHex = bytesToHex(opReturnPayload);
-    console.log('[BitMessage] OP_RETURN hex:', opReturnHex);
+    // Step 1: build OP_RETURN payload
+    const opReturnBytes = await buildOpReturnPayload(msgText, isEnc);
+    console.log('[BitMessage] OP_RETURN bytes:', opReturnBytes.length);
     stepDone(1); stepActive(2);
 
-    // Step 2: sign via UniSat native API
-    // UniSat supports sendBitcoin with OP_RETURN via the `outputs` array in newer versions.
-    // We use the recommended approach: build PSBT using UniSat's own bitcoin library.
-    const utxos = await getUtxos(STATE.wallet.address);
-    if (!utxos || utxos.length === 0) throw new Error('No UTXOs found. Fund your testnet address first.');
-    console.log('[BitMessage] UTXOs:', utxos);
-
-    const feeRate  = STATE.feeRate || 2;
-    const psbtHex  = await buildPsbtHex(utxos, recipient, amount, opReturnPayload, feeRate);
-    console.log('[BitMessage] PSBT hex (first 40):', psbtHex.slice(0, 40));
-
-    stepDone(2); stepActive(3);
-
-    // Sign & broadcast via UniSat
-    let txid;
     const walletProvider = STATE.wallet.type === 'unisat'
       ? window.unisat
       : (window.opnet || window.opwallet);
 
+    const feeRate = STATE.feeRate || 2;
+    let txid;
+
+    // Get UTXOs
+    const utxos = await getUtxos(STATE.wallet.address);
+    if (!utxos || utxos.length === 0) throw new Error('No UTXOs. Fund your testnet address first.');
+    console.log('[BitMessage] UTXOs:', utxos);
+
+    // Build PSBT as base64 — UniSat expects base64, hex causes internal startsWith error
+    const psbtBase64 = await buildPsbtBase64(utxos, recipient, amount, opReturnBytes, feeRate);
+    console.log('[BitMessage] PSBT base64 (first 40):', psbtBase64.slice(0, 40));
+
+    stepDone(2); stepActive(3);
+
+    // Sign
+    let signedResult;
     try {
-      // Approach 1: signAndBroadcastPsbt (some UniSat versions)
-      if (typeof walletProvider.signAndBroadcastPsbt === 'function') {
-        console.log('[BitMessage] using signAndBroadcastPsbt');
-        const res = await walletProvider.signAndBroadcastPsbt(psbtHex);
-        txid = typeof res === 'string' ? res : (res.txid || res.tx || JSON.stringify(res));
-
-      } else {
-        // Approach 2: signPsbt then pushTx
-        console.log('[BitMessage] using signPsbt + pushTx');
-        const signedRaw = await walletProvider.signPsbt(psbtHex, { autoFinalized: true });
-        console.log('[BitMessage] signPsbt result — type:', typeof signedRaw,
-          typeof signedRaw === 'string' ? 'value: ' + signedRaw.slice(0, 40) : JSON.stringify(signedRaw).slice(0, 80));
-
-        // signedRaw MUST be a string for pushTx
-        let signedHex;
-        if (typeof signedRaw === 'string') {
-          signedHex = signedRaw;
-        } else if (signedRaw && typeof signedRaw === 'object') {
-          signedHex = signedRaw.psbtHex || signedRaw.txHex || signedRaw.rawtx || signedRaw.hex || signedRaw.tx;
-          if (!signedHex) {
-            // Last resort: if it has numeric keys it might be a Buffer-like object
-            const arr = Object.values(signedRaw);
-            if (arr.length > 0 && typeof arr[0] === 'number') {
-              signedHex = bytesToHex(new Uint8Array(arr));
-            }
-          }
-        }
-        if (!signedHex) throw new Error('Could not extract hex from signPsbt result: ' + JSON.stringify(signedRaw));
-
-        signedHex = String(signedHex).trim();
-        console.log('[BitMessage] signedHex to broadcast:', signedHex.slice(0, 40));
-
-        // Push — if still PSBT format, use pushPsbt; else broadcast raw
-        if (signedHex.startsWith('70736274')) {
-          console.log('[BitMessage] pushing PSBT via pushTx');
-          const pushRes = await walletProvider.pushTx({ rawtx: signedHex });
-          txid = typeof pushRes === 'string' ? pushRes : (pushRes.txid || pushRes.tx || JSON.stringify(pushRes));
-        } else {
-          console.log('[BitMessage] broadcasting raw tx');
-          txid = await broadcastTx(signedHex);
-        }
-      }
+      signedResult = await walletProvider.signPsbt(psbtBase64, {
+        autoFinalized: true,
+        broadcast: false,
+      });
+      console.log('[BitMessage] signPsbt result:', typeof signedResult, String(signedResult).slice(0, 40));
     } catch (signErr) {
-      console.error('[BitMessage] sign/broadcast error:', signErr);
-      throw signErr;
+      console.error('[BitMessage] signPsbt failed:', signErr);
+      throw new Error('Signing failed: ' + (signErr.message || JSON.stringify(signErr)));
     }
 
-    if (!txid || typeof txid !== 'string') throw new Error('No txid returned: ' + JSON.stringify(txid));
+    // Broadcast
+    stepActive(4);
+    txid = await extractAndBroadcast(signedResult, walletProvider);
     console.log('[BitMessage] txid:', txid);
-    stepDone(3);
-    stepDone(4);
+    stepDone(3); stepDone(4);
 
     // Save locally
     const entry = {
@@ -1632,6 +1595,138 @@ function closeModal() {
 /* ═══════════════════════════════════════════════════
    PSBT BUILDER (P2WPKH standard)
 ═══════════════════════════════════════════════════ */
+// ─── buildPsbtBase64 ────────────────────────────────────────────────────────
+// Builds a valid PSBT using bitcoinjs-lib and returns it as BASE64 string.
+// UniSat internally uses base64 — passing hex causes its own startsWith to fail.
+async function buildPsbtBase64(utxos, toAddress, amountSats, opReturnScript, feeRate) {
+  const selfAddr = String(STATE.wallet.address).trim();
+  const FEE      = Math.ceil((feeRate || STATE.feeRate || 2) * ESTIMATED_TX_VBYTES);
+  const need     = amountSats + FEE;
+
+  console.log('[BitMessage] buildPsbtBase64 from:', selfAddr, 'to:', toAddress, 'amt:', amountSats, 'fee:', FEE);
+
+  // Coin selection
+  let selected = [], totalIn = 0;
+  for (const u of utxos) {
+    selected.push(u);
+    totalIn += u.value;
+    if (totalIn >= need) break;
+  }
+  if (totalIn < need) throw new Error('Insufficient funds: have ' + totalIn + ' need ' + need);
+  const changeAmt = totalIn - amountSats - FEE;
+
+  if (typeof bitcoin === 'undefined' || !bitcoin.Psbt) throw new Error('bitcoinjs-lib not loaded');
+
+  const network = NETWORK === 'testnet' ? bitcoin.networks.testnet : bitcoin.networks.bitcoin;
+  const psbt    = new bitcoin.Psbt({ network });
+
+  // Inputs
+  for (const u of selected) {
+    psbt.addInput({
+      hash:        u.txid,
+      index:       u.vout,
+      witnessUtxo: {
+        script: bitcoin.address.toOutputScript(selfAddr, network),
+        value:  u.value,
+      },
+    });
+  }
+
+  // Output 1: recipient
+  psbt.addOutput({ address: String(toAddress).trim(), value: amountSats });
+
+  // Output 2: OP_RETURN with message
+  if (opReturnScript && opReturnScript.length > 0) {
+    // opReturnScript is a Uint8Array — convert to Buffer for bitcoinjs
+    const scriptBuf = Buffer.from ? Buffer.from(opReturnScript) : toBuffer(opReturnScript);
+    psbt.addOutput({ script: scriptBuf, value: 0 });
+  }
+
+  // Output 3: change
+  if (changeAmt >= 546) {
+    psbt.addOutput({ address: selfAddr, value: changeAmt });
+  }
+
+  // Return as base64 — NOT hex
+  const base64 = psbt.toBase64();
+  console.log('[BitMessage] PSBT base64 length:', base64.length, 'starts:', base64.slice(0, 20));
+  return base64;
+}
+
+// Helper: Uint8Array → Buffer polyfill for browsers without Buffer global
+function toBuffer(uint8arr) {
+  if (typeof Buffer !== 'undefined') return Buffer.from(uint8arr);
+  // Minimal polyfill: return a Uint8Array with slice method (bitcoinjs accepts this)
+  return uint8arr;
+}
+
+// ─── extractAndBroadcast ─────────────────────────────────────────────────────
+// Takes whatever signPsbt returns (base64 PSBT or hex), extracts raw tx, broadcasts.
+async function extractAndBroadcast(signedResult, walletProvider) {
+  console.log('[BitMessage] extractAndBroadcast — type:', typeof signedResult);
+
+  let txid;
+
+  // 1. Try wallet's own pushTx first (it knows how to finalize its own PSBT)
+  try {
+    const raw = typeof signedResult === 'string' ? signedResult : JSON.stringify(signedResult);
+    const pushRes = await walletProvider.pushTx({ rawtx: raw });
+    txid = typeof pushRes === 'string' ? pushRes : (pushRes.txid || pushRes.tx_hash || pushRes.hash);
+    if (txid) { console.log('[BitMessage] pushTx success:', txid); return String(txid).trim(); }
+  } catch(e) {
+    console.warn('[BitMessage] pushTx failed:', e.message, '— trying direct broadcast');
+  }
+
+  // 2. Finalize PSBT and extract raw tx using bitcoinjs
+  try {
+    if (typeof bitcoin !== 'undefined' && bitcoin.Psbt) {
+      const network = NETWORK === 'testnet' ? bitcoin.networks.testnet : bitcoin.networks.bitcoin;
+      let psbt;
+      if (typeof signedResult === 'string') {
+        // Try base64 first, then hex
+        try { psbt = bitcoin.Psbt.fromBase64(signedResult, { network }); }
+        catch(_) { psbt = bitcoin.Psbt.fromHex(signedResult, { network }); }
+      }
+      if (psbt) {
+        try { psbt.finalizeAllInputs(); } catch(_) {} // already finalized if autoFinalized=true
+        const rawHex = psbt.extractTransaction().toHex();
+        console.log('[BitMessage] extracted raw tx:', rawHex.slice(0, 40));
+        txid = await broadcastRaw(rawHex);
+        if (txid) return String(txid).trim();
+      }
+    }
+  } catch(e) {
+    console.warn('[BitMessage] bitcoinjs finalize failed:', e.message);
+  }
+
+  throw new Error('Could not broadcast transaction');
+}
+
+// ─── broadcastRaw ────────────────────────────────────────────────────────────
+async function broadcastRaw(hexTx) {
+  const apis = NETWORK === 'testnet' ? [
+    'https://blockstream.info/testnet/api/tx',
+    'https://mempool.space/testnet/api/tx',
+  ] : [
+    'https://blockstream.info/api/tx',
+    'https://mempool.space/api/tx',
+  ];
+  for (const url of apis) {
+    try {
+      const r = await fetch(url, { method: 'POST', body: hexTx, headers: { 'Content-Type': 'text/plain' } });
+      if (r.ok) {
+        const txid = (await r.text()).trim();
+        console.log('[BitMessage] broadcast ok via', url, txid);
+        return txid;
+      }
+      console.warn('[BitMessage] broadcast rejected by', url, await r.text());
+    } catch(e) {
+      console.warn('[BitMessage] broadcast error', url, e.message);
+    }
+  }
+  throw new Error('All broadcast endpoints failed');
+}
+
 // buildPsbtHex — uses bitcoinjs-lib for correct PSBT construction
 async function buildPsbtHex(utxos, toAddress, amountSats, opReturnScript, feeRate) {
   const selfAddr = String(STATE.wallet.address).trim();

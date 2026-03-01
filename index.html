@@ -1712,58 +1712,76 @@ function uint8ToBase64(bytes) {
 }
 
 // ─── extractAndBroadcast ─────────────────────────────────────────────────────
+// UniSat signPsbt(base64) returns signed PSBT as hex string.
+// We convert it back to base64 and use pushPsbt, or extract tx manually.
 async function extractAndBroadcast(signedResult, walletProvider) {
-  console.log('[BitMessage] extractAndBroadcast type:', typeof signedResult,
-    String(signedResult).slice(0, 40));
+  console.log('[BitMessage] extractAndBroadcast — type:', typeof signedResult,
+    String(signedResult).slice(0, 60));
 
-  // UniSat returns base64 signed PSBT — extract raw tx manually
-  let rawHex = null;
+  if (!signedResult) throw new Error('signPsbt returned empty result');
 
-  if (typeof signedResult === 'string') {
-    // Detect: base64 or hex?
-    const s = signedResult.trim();
-    if (/^[0-9a-fA-F]+$/.test(s) && s.length % 2 === 0) {
-      // Looks like hex — might be raw tx or hex-PSBT
-      if (s.startsWith('70736274')) {
-        // hex-encoded PSBT → extract tx
-        rawHex = psbtHexToRawTx(s);
-      } else {
-        // Already a raw tx hex
-        rawHex = s;
-      }
-    } else {
-      // base64 PSBT
+  // Normalize to string
+  let s = typeof signedResult === 'string' ? signedResult.trim() : bytesToHex(signedResult);
+
+  // Detect format: hex PSBT, base64 PSBT, or raw tx hex
+  const isHex    = /^[0-9a-fA-F]+$/.test(s) && s.length % 2 === 0;
+  const isPsbtHex = isHex && s.startsWith('70736274');
+  const isRawTx   = isHex && !isPsbtHex;
+
+  console.log('[BitMessage] format — isHex:', isHex, 'isPsbtHex:', isPsbtHex, 'isRawTx:', isRawTx);
+
+  // Case 1: already a raw tx → broadcast directly
+  if (isRawTx) {
+    console.log('[BitMessage] broadcasting raw tx hex');
+    return await broadcastRaw(s);
+  }
+
+  // Case 2: hex-encoded PSBT → convert to base64 → try pushPsbt
+  if (isPsbtHex) {
+    console.log('[BitMessage] got hex PSBT, converting to base64 for pushPsbt');
+    const psbtBytes = hexToBytes(s);
+    const psbtB64   = uint8ToBase64(psbtBytes);
+
+    // Try pushPsbt (UniSat v1.3+)
+    if (typeof walletProvider.pushPsbt === 'function') {
       try {
-        const psbtBytes = base64ToUint8(s);
-        rawHex = parsePsbtExtractTx(psbtBytes);
-      } catch(e) {
-        console.warn('[BitMessage] PSBT parse failed:', e.message);
-      }
+        const res = await walletProvider.pushPsbt(psbtB64);
+        console.log('[BitMessage] pushPsbt result:', res);
+        const txid = typeof res === 'string' ? res : (res.txid || res.tx_hash);
+        if (txid) return String(txid).trim();
+      } catch(e) { console.warn('[BitMessage] pushPsbt failed:', e.message); }
     }
+
+    // Try extracting raw tx from PSBT bytes
+    try {
+      const rawHex = extractRawTxFromPsbt(psbtBytes);
+      console.log('[BitMessage] extracted raw tx:', rawHex.slice(0, 40));
+      return await broadcastRaw(rawHex);
+    } catch(e) { console.warn('[BitMessage] extract failed:', e.message); }
   }
 
-  // Try direct broadcast if we extracted a raw tx
-  if (rawHex) {
-    console.log('[BitMessage] broadcasting raw tx:', rawHex.slice(0, 40));
-    try { return await broadcastRaw(rawHex); } catch(e) {
-      console.warn('[BitMessage] direct broadcast failed:', e.message);
+  // Case 3: base64 PSBT
+  if (!isHex) {
+    console.log('[BitMessage] got base64 PSBT');
+    const psbtBytes = base64ToUint8(s);
+
+    if (typeof walletProvider.pushPsbt === 'function') {
+      try {
+        const res = await walletProvider.pushPsbt(s);
+        const txid = typeof res === 'string' ? res : (res.txid || res.tx_hash);
+        if (txid) return String(txid).trim();
+      } catch(e) { console.warn('[BitMessage] pushPsbt (b64) failed:', e.message); }
     }
+
+    try {
+      const rawHex = extractRawTxFromPsbt(psbtBytes);
+      return await broadcastRaw(rawHex);
+    } catch(e) { console.warn('[BitMessage] extract from b64 failed:', e.message); }
   }
 
-  // Fallback: let wallet push it
-  console.log('[BitMessage] falling back to wallet pushTx');
-  const raw = typeof signedResult === 'string' ? signedResult : JSON.stringify(signedResult);
-  try {
-    const pushRes = await walletProvider.pushTx({ rawtx: raw });
-    const txid = typeof pushRes === 'string' ? pushRes : (pushRes.txid || pushRes.tx_hash || pushRes.hash);
-    if (txid) return String(txid).trim();
-  } catch(e) {
-    console.error('[BitMessage] pushTx also failed:', e.message);
-    throw e;
-  }
-
-  throw new Error('Could not broadcast transaction — no txid returned');
+  throw new Error('Could not broadcast — unknown format from wallet');
 }
+
 
 // base64 → Uint8Array
 function base64ToUint8(b64) {
@@ -1773,103 +1791,127 @@ function base64ToUint8(b64) {
   return out;
 }
 
-// Extract raw tx from a signed+finalized PSBT (Uint8Array)
-// Parses BIP174 structure to find per-input signatures and reconstructs segwit tx
-function parsePsbtExtractTx(psbt) {
-  let i = 5; // skip magic (5 bytes)
+// ─── extractRawTxFromPsbt ────────────────────────────────────────────────────
+// Parse finalized BIP174 PSBT bytes, extract witness data, rebuild segwit tx.
+function extractRawTxFromPsbt(psbt) {
+  let pos = 0;
 
-  function readVI(buf, pos) {
-    const first = buf[pos];
-    if (first < 0xfd) return { val: first, len: 1 };
-    if (first === 0xfd) return { val: buf[pos+1] | (buf[pos+2]<<8), len: 3 };
-    if (first === 0xfe) return { val: buf[pos+1]|(buf[pos+2]<<8)|(buf[pos+3]<<16)|(buf[pos+4]<<24), len: 5 };
-    throw new Error('varint too large');
+  // Check magic: 70 73 62 74 FF
+  if (psbt[0]!==0x70||psbt[1]!==0x73||psbt[2]!==0x62||psbt[3]!==0x74||psbt[4]!==0xFF)
+    throw new Error('Not a PSBT');
+  pos = 5;
+
+  // Read varint
+  function vi(p) {
+    const b = psbt[p];
+    if (b < 0xfd) return { v: b,                          n: 1 };
+    if (b === 0xfd) return { v: psbt[p+1]|(psbt[p+2]<<8), n: 3 };
+    return { v: psbt[p+1]|(psbt[p+2]<<8)|(psbt[p+3]<<16)|(psbt[p+4]<<24), n: 5 };
   }
 
-  function readMap(buf, pos) {
+  // Read one map → array of {k, v} pairs, advance pos
+  function readMap() {
     const entries = [];
-    while (buf[pos] !== 0x00) {
-      const kl = readVI(buf, pos); pos += kl.len;
-      const key = buf.slice(pos, pos + kl.val); pos += kl.val;
-      const vl = readVI(buf, pos); pos += vl.len;
-      const val = buf.slice(pos, pos + vl.val); pos += vl.val;
-      entries.push({ key, val });
+    while (pos < psbt.length && psbt[pos] !== 0x00) {
+      const kl = vi(pos); pos += kl.n;
+      const k  = psbt.slice(pos, pos + kl.v); pos += kl.v;
+      const vl = vi(pos); pos += vl.n;
+      const v  = psbt.slice(pos, pos + vl.v); pos += vl.v;
+      entries.push({ k, v });
     }
-    return { entries, pos: pos + 1 }; // skip 0x00
+    pos++; // skip 0x00 separator
+    return entries;
   }
 
-  // Global map: find unsigned tx (key type 0x00)
-  const gm = readMap(psbt, i); i = gm.pos;
-  let unsignedTx = null;
-  for (const e of gm.entries) if (e.key[0] === 0x00) { unsignedTx = e.val; break; }
-  if (!unsignedTx) throw new Error('No unsigned tx in PSBT global map');
+  // ── Global map ──────────────────────────────────────────────────────────────
+  const globalEntries = readMap();
+  let rawTxBytes = null;
+  for (const e of globalEntries) {
+    if (e.k.length === 1 && e.k[0] === 0x00) { rawTxBytes = e.v; break; }
+  }
+  if (!rawTxBytes) throw new Error('No unsigned tx in PSBT');
+  console.log('[BitMessage] unsigned tx bytes:', rawTxBytes.length);
 
-  // Parse unsigned tx to count inputs/outputs
+  // Parse unsigned tx
   let tp = 0;
-  tp += 4; // version
-  const inCount = readVI(unsignedTx, tp); tp += inCount.len;
-  const nIns = inCount.val;
+  const txVersion = rawTxBytes.slice(tp, tp+4); tp += 4;
+  const inC = vi(tp); tp += inC.n;
+  const nIns = inC.v;
+  console.log('[BitMessage] nIns:', nIns);
 
-  // Collect input data (txid, vout, seq)
-  const inputsData = [];
+  const rawIns = [];
   for (let k = 0; k < nIns; k++) {
-    const start = tp;
-    tp += 36; // txid(32) + vout(4)
-    const ssl = readVI(unsignedTx, tp); tp += ssl.len + ssl.val; // scriptSig
+    const s = tp;
+    tp += 36; // txid(32)+vout(4)
+    const ssl = vi(tp); tp += ssl.n + ssl.v; // empty scriptSig
     tp += 4; // sequence
-    inputsData.push(unsignedTx.slice(start, tp));
+    rawIns.push(rawTxBytes.slice(s, tp));
   }
-  const outCount = readVI(unsignedTx, tp); tp += outCount.len;
-  const nOuts = outCount.val;
+
+  const outC = vi(tp); tp += outC.n;
+  const nOuts = outC.v;
   const outsStart = tp;
   for (let k = 0; k < nOuts; k++) {
     tp += 8;
-    const ssl = readVI(unsignedTx, tp); tp += ssl.len + ssl.val;
+    const ssl = vi(tp); tp += ssl.n + ssl.v;
   }
-  const rawOuts = unsignedTx.slice(outsStart, tp);
-  const locktime = unsignedTx.slice(tp, tp + 4);
+  const rawOuts = rawTxBytes.slice(outsStart, tp);
+  const txLocktime = rawTxBytes.slice(tp, tp+4);
 
-  // Per-input maps: find PARTIAL_SIG (key type 0x02) or FINAL_SCRIPTSIG/WITNESS
-  const sigs = [];
+  // ── Per-input maps: collect FINAL_SCRIPTWITNESS (key 0x07) ─────────────────
+  const witnesses = [];
   for (let k = 0; k < nIns; k++) {
-    const im = readMap(psbt, i); i = im.pos;
-    let sig = null, witness = null;
-    for (const e of im.entries) {
-      if (e.key[0] === 0x02) sig = e.val;         // PARTIAL_SIG
-      if (e.key[0] === 0x07) witness = e.val;     // FINAL_SCRIPTWITNESS
+    const entries = readMap();
+    let witness = null;
+    let partialSig = null;
+    let pubkey = null;
+    for (const e of entries) {
+      if (e.k[0] === 0x07) witness     = e.v; // FINAL_SCRIPTWITNESS
+      if (e.k[0] === 0x02) partialSig  = e.v; // PARTIAL_SIG (key = type+pubkey)
+      if (e.k[0] === 0x0e) pubkey      = e.v; // TAP_BIP32_DERIVATION or similar
     }
-    sigs.push({ sig, witness });
+
+    if (witness) {
+      // Already serialized witness stack — use as-is
+      witnesses.push(witness);
+    } else if (partialSig) {
+      // Build P2WPKH witness: [sig, pubkey]
+      // key for PARTIAL_SIG is: type(1) + pubkey(33) → e.k = [0x02, ...pubkey]
+      const pk  = partialSig.k ? partialSig.k.slice(1) : (entries.find(e=>e.k[0]===0x02)?.k.slice(1));
+      const sig = partialSig.v || partialSig;
+      // Find pubkey from the PARTIAL_SIG key itself
+      const sigEntry = entries.find(e => e.k[0] === 0x02);
+      if (sigEntry) {
+        const sigBytes = sigEntry.v;
+        const pkBytes  = sigEntry.k.slice(1); // pubkey is in the key after type byte
+        witnesses.push(concat([
+          new Uint8Array([0x02]),
+          encodeVarInt(sigBytes.length), sigBytes,
+          encodeVarInt(pkBytes.length),  pkBytes,
+        ]));
+      } else {
+        witnesses.push(new Uint8Array([0x00]));
+      }
+    } else {
+      witnesses.push(new Uint8Array([0x00]));
+    }
   }
 
-  // Rebuild segwit tx: version | 0x00 0x01 | inputs | outputs | witness | locktime
-  const version = unsignedTx.slice(0, 4);
-  const segwitMarker = new Uint8Array([0x00, 0x01]);
-
-  // Build witness stack for each input
-  const witnesses = sigs.map(({ sig, witness }) => {
-    if (witness) return witness; // already serialized witness
-    if (sig) {
-      // P2WPKH: witness = [sig]  (pubkey provided separately but UniSat finalizes it)
-      return concat([new Uint8Array([0x01]), encodeVarInt(sig.length), sig]);
-    }
-    return new Uint8Array([0x00]); // empty witness
-  });
-
-  const rawTx = concat([
-    version,
-    segwitMarker,
-    encodeVarInt(nIns), ...inputsData,
+  // ── Assemble segwit tx ──────────────────────────────────────────────────────
+  const finalTx = concat([
+    txVersion,
+    new Uint8Array([0x00, 0x01]),           // segwit marker + flag
+    encodeVarInt(nIns), ...rawIns,
     encodeVarInt(nOuts), rawOuts,
     ...witnesses,
-    locktime,
+    txLocktime,
   ]);
 
-  return bytesToHex(rawTx);
+  console.log('[BitMessage] reconstructed tx bytes:', finalTx.length);
+  return bytesToHex(finalTx);
 }
 
-function psbtHexToRawTx(hexPsbt) {
-  return parsePsbtExtractTx(hexToBytes(hexPsbt));
-}
+
 
 // ─── broadcastRaw ────────────────────────────────────────────────────────────
 async function broadcastRaw(hexTx) {

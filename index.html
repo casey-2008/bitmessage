@@ -563,8 +563,6 @@ textarea.field-input.encrypted-mode {
   .how-grid { grid-template-columns:1fr; }
 }
 </style>
-<!-- Bitcoin libs -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/bitcoinjs-lib/5.2.0/bitcoinjs-lib.min.js"></script>
 </head>
 <body>
 <div class="app">
@@ -1595,273 +1593,299 @@ function closeModal() {
 /* ═══════════════════════════════════════════════════
    PSBT BUILDER (P2WPKH standard)
 ═══════════════════════════════════════════════════ */
-// ─── buildPsbtBase64 ────────────────────────────────────────────────────────
-// Builds a valid PSBT using bitcoinjs-lib and returns it as BASE64 string.
-// UniSat internally uses base64 — passing hex causes its own startsWith to fail.
+// ─── buildPsbtBase64 ─────────────────────────────────────────────────────────
+// Pure-JS BIP174 PSBT builder. No external deps. Returns base64 string.
+// Structure: magic | global(unsignedTx) | inputs(witnessUtxo) | outputs(empty)
 async function buildPsbtBase64(utxos, toAddress, amountSats, opReturnScript, feeRate) {
-  const selfAddr = String(STATE.wallet.address).trim();
-  const FEE      = Math.ceil((feeRate || STATE.feeRate || 2) * ESTIMATED_TX_VBYTES);
-  const need     = amountSats + FEE;
+  const selfAddr  = String(STATE.wallet.address).trim();
+  const FEE       = Math.ceil((feeRate || STATE.feeRate || 2) * ESTIMATED_TX_VBYTES);
+  const need      = amountSats + FEE;
 
   console.log('[BitMessage] buildPsbtBase64 from:', selfAddr, 'to:', toAddress, 'amt:', amountSats, 'fee:', FEE);
 
-  // Coin selection
+  // ── Coin selection ──────────────────────────────────────────────────────────
   let selected = [], totalIn = 0;
   for (const u of utxos) {
     selected.push(u);
     totalIn += u.value;
     if (totalIn >= need) break;
   }
-  if (totalIn < need) throw new Error('Insufficient funds: have ' + totalIn + ' need ' + need);
+  if (totalIn < need) throw new Error('Insufficient: have ' + totalIn + ' need ' + need);
   const changeAmt = totalIn - amountSats - FEE;
 
-  if (typeof bitcoin === 'undefined' || !bitcoin.Psbt) throw new Error('bitcoinjs-lib not loaded');
+  // ── Scripts ─────────────────────────────────────────────────────────────────
+  const selfScript = addrToScript(selfAddr);
+  const toScript   = addrToScript(String(toAddress).trim());
 
-  const network = NETWORK === 'testnet' ? bitcoin.networks.testnet : bitcoin.networks.bitcoin;
-  const psbt    = new bitcoin.Psbt({ network });
+  // ── Build unsigned tx ───────────────────────────────────────────────────────
+  const SEQ = 0xffffffff;
+  const txIns = selected.map(u => {
+    const txidBytes = hexToBytes(u.txid).reverse(); // little-endian
+    return concat([txidBytes, uint32LE(u.vout), new Uint8Array([0x00]), uint32LE(SEQ)]);
+  });
 
-  // Inputs
-  for (const u of selected) {
-    psbt.addInput({
-      hash:        u.txid,
-      index:       u.vout,
-      witnessUtxo: {
-        script: bitcoin.address.toOutputScript(selfAddr, network),
-        value:  u.value,
-      },
-    });
-  }
-
-  // Output 1: recipient
-  psbt.addOutput({ address: String(toAddress).trim(), value: amountSats });
-
-  // Output 2: OP_RETURN with message
+  // Outputs: recipient, OP_RETURN, change
+  const txOuts = [];
+  txOuts.push(makeTxOut(amountSats, toScript));
   if (opReturnScript && opReturnScript.length > 0) {
-    // opReturnScript is a Uint8Array — convert to Buffer for bitcoinjs
-    const scriptBuf = Buffer.from ? Buffer.from(opReturnScript) : toBuffer(opReturnScript);
-    psbt.addOutput({ script: scriptBuf, value: 0 });
+    txOuts.push(makeTxOut(0, opReturnScript));
   }
+  if (changeAmt >= 546) txOuts.push(makeTxOut(changeAmt, selfScript));
 
-  // Output 3: change
-  if (changeAmt >= 546) {
-    psbt.addOutput({ address: selfAddr, value: changeAmt });
-  }
+  const unsignedTx = concat([
+    uint32LE(2),                                         // version
+    encodeVarInt(txIns.length), ...txIns,               // inputs
+    encodeVarInt(txOuts.length), ...txOuts,              // outputs
+    uint32LE(0),                                         // locktime
+  ]);
 
-  // Return as base64 — NOT hex
-  const base64 = psbt.toBase64();
-  console.log('[BitMessage] PSBT base64 length:', base64.length, 'starts:', base64.slice(0, 20));
-  return base64;
+  // ── Assemble PSBT ───────────────────────────────────────────────────────────
+  // PSBT magic
+  const magic = new Uint8Array([0x70, 0x73, 0x62, 0x74, 0xff]);
+
+  // Global map: key=<0x00> value=<unsignedTx>
+  const globalMap = concat([
+    psbtKV(new Uint8Array([0x00]), unsignedTx),
+    new Uint8Array([0x00]),  // end global map
+  ]);
+
+  // Per-input maps: key=<0x01> value=<witnessUtxo output>
+  const inputMaps = concat(selected.map(u => concat([
+    psbtKV(new Uint8Array([0x01]), makeTxOut(u.value, selfScript)),
+    new Uint8Array([0x00]),  // end input map
+  ])));
+
+  // Per-output maps: all empty
+  const outputMaps = concat(txOuts.map(() => new Uint8Array([0x00])));
+
+  const psbtBytes = concat([magic, globalMap, inputMaps, outputMaps]);
+
+  // Return as base64
+  const b64 = uint8ToBase64(psbtBytes);
+  console.log('[BitMessage] PSBT base64 length:', b64.length, 'starts:', b64.slice(0, 20));
+  return b64;
 }
 
-// Helper: Uint8Array → Buffer polyfill for browsers without Buffer global
-function toBuffer(uint8arr) {
-  if (typeof Buffer !== 'undefined') return Buffer.from(uint8arr);
-  // Minimal polyfill: return a Uint8Array with slice method (bitcoinjs accepts this)
-  return uint8arr;
+// key-value pair for PSBT map: varint(keyLen) | key | varint(valLen) | val
+function psbtKV(key, val) {
+  return concat([encodeVarInt(key.length), key, encodeVarInt(val.length), val]);
+}
+
+// Build a tx output: 8-byte LE value + varint(scriptLen) + script
+function makeTxOut(value, script) {
+  const v = new Uint8Array(8);
+  const lo = value >>> 0, hi = Math.floor(value / 0x100000000);
+  new DataView(v.buffer).setUint32(0, lo, true);
+  new DataView(v.buffer).setUint32(4, hi, true);
+  return concat([v, encodeVarInt(script.length), script]);
+}
+
+// Address → scriptPubKey (P2WPKH / P2WSH bech32, P2PKH base58)
+function addrToScript(address) {
+  address = String(address).trim();
+  // bech32 (tb1... / bc1...)
+  if (address.startsWith('tb1') || address.startsWith('bc1')) {
+    const dec = bech32Decode(address);
+    if (!dec) throw new Error('Invalid bech32: ' + address);
+    const { witVer, witProg } = dec;
+    // OP_0 for v0, OP_1..OP_16 for v1+
+    const opcode = witVer === 0 ? 0x00 : (0x50 + witVer);
+    return new Uint8Array([opcode, witProg.length, ...witProg]);
+  }
+  // base58check (legacy P2PKH / P2SH)
+  const dec = base58Decode(address);
+  if (!dec || dec.length < 21) throw new Error('Invalid base58 address: ' + address);
+  const hash = dec.slice(1, 21);
+  const ver  = dec[0];
+  if (ver === 0x00 || ver === 0x6f) // mainnet / testnet P2PKH
+    return new Uint8Array([0x76, 0xa9, 0x14, ...hash, 0x88, 0xac]);
+  if (ver === 0x05 || ver === 0xc4) // mainnet / testnet P2SH
+    return new Uint8Array([0xa9, 0x14, ...hash, 0x87]);
+  throw new Error('Unknown address version: ' + ver);
+}
+
+// Uint8Array → base64 string
+function uint8ToBase64(bytes) {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
 }
 
 // ─── extractAndBroadcast ─────────────────────────────────────────────────────
-// Takes whatever signPsbt returns (base64 PSBT or hex), extracts raw tx, broadcasts.
 async function extractAndBroadcast(signedResult, walletProvider) {
-  console.log('[BitMessage] extractAndBroadcast — type:', typeof signedResult);
+  console.log('[BitMessage] extractAndBroadcast type:', typeof signedResult,
+    String(signedResult).slice(0, 40));
 
-  let txid;
+  // UniSat returns base64 signed PSBT — extract raw tx manually
+  let rawHex = null;
 
-  // 1. Try wallet's own pushTx first (it knows how to finalize its own PSBT)
-  try {
-    const raw = typeof signedResult === 'string' ? signedResult : JSON.stringify(signedResult);
-    const pushRes = await walletProvider.pushTx({ rawtx: raw });
-    txid = typeof pushRes === 'string' ? pushRes : (pushRes.txid || pushRes.tx_hash || pushRes.hash);
-    if (txid) { console.log('[BitMessage] pushTx success:', txid); return String(txid).trim(); }
-  } catch(e) {
-    console.warn('[BitMessage] pushTx failed:', e.message, '— trying direct broadcast');
-  }
-
-  // 2. Finalize PSBT and extract raw tx using bitcoinjs
-  try {
-    if (typeof bitcoin !== 'undefined' && bitcoin.Psbt) {
-      const network = NETWORK === 'testnet' ? bitcoin.networks.testnet : bitcoin.networks.bitcoin;
-      let psbt;
-      if (typeof signedResult === 'string') {
-        // Try base64 first, then hex
-        try { psbt = bitcoin.Psbt.fromBase64(signedResult, { network }); }
-        catch(_) { psbt = bitcoin.Psbt.fromHex(signedResult, { network }); }
+  if (typeof signedResult === 'string') {
+    // Detect: base64 or hex?
+    const s = signedResult.trim();
+    if (/^[0-9a-fA-F]+$/.test(s) && s.length % 2 === 0) {
+      // Looks like hex — might be raw tx or hex-PSBT
+      if (s.startsWith('70736274')) {
+        // hex-encoded PSBT → extract tx
+        rawHex = psbtHexToRawTx(s);
+      } else {
+        // Already a raw tx hex
+        rawHex = s;
       }
-      if (psbt) {
-        try { psbt.finalizeAllInputs(); } catch(_) {} // already finalized if autoFinalized=true
-        const rawHex = psbt.extractTransaction().toHex();
-        console.log('[BitMessage] extracted raw tx:', rawHex.slice(0, 40));
-        txid = await broadcastRaw(rawHex);
-        if (txid) return String(txid).trim();
+    } else {
+      // base64 PSBT
+      try {
+        const psbtBytes = base64ToUint8(s);
+        rawHex = parsePsbtExtractTx(psbtBytes);
+      } catch(e) {
+        console.warn('[BitMessage] PSBT parse failed:', e.message);
       }
     }
-  } catch(e) {
-    console.warn('[BitMessage] bitcoinjs finalize failed:', e.message);
   }
 
-  throw new Error('Could not broadcast transaction');
+  // Try direct broadcast if we extracted a raw tx
+  if (rawHex) {
+    console.log('[BitMessage] broadcasting raw tx:', rawHex.slice(0, 40));
+    try { return await broadcastRaw(rawHex); } catch(e) {
+      console.warn('[BitMessage] direct broadcast failed:', e.message);
+    }
+  }
+
+  // Fallback: let wallet push it
+  console.log('[BitMessage] falling back to wallet pushTx');
+  const raw = typeof signedResult === 'string' ? signedResult : JSON.stringify(signedResult);
+  try {
+    const pushRes = await walletProvider.pushTx({ rawtx: raw });
+    const txid = typeof pushRes === 'string' ? pushRes : (pushRes.txid || pushRes.tx_hash || pushRes.hash);
+    if (txid) return String(txid).trim();
+  } catch(e) {
+    console.error('[BitMessage] pushTx also failed:', e.message);
+    throw e;
+  }
+
+  throw new Error('Could not broadcast transaction — no txid returned');
+}
+
+// base64 → Uint8Array
+function base64ToUint8(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+// Extract raw tx from a signed+finalized PSBT (Uint8Array)
+// Parses BIP174 structure to find per-input signatures and reconstructs segwit tx
+function parsePsbtExtractTx(psbt) {
+  let i = 5; // skip magic (5 bytes)
+
+  function readVI(buf, pos) {
+    const first = buf[pos];
+    if (first < 0xfd) return { val: first, len: 1 };
+    if (first === 0xfd) return { val: buf[pos+1] | (buf[pos+2]<<8), len: 3 };
+    if (first === 0xfe) return { val: buf[pos+1]|(buf[pos+2]<<8)|(buf[pos+3]<<16)|(buf[pos+4]<<24), len: 5 };
+    throw new Error('varint too large');
+  }
+
+  function readMap(buf, pos) {
+    const entries = [];
+    while (buf[pos] !== 0x00) {
+      const kl = readVI(buf, pos); pos += kl.len;
+      const key = buf.slice(pos, pos + kl.val); pos += kl.val;
+      const vl = readVI(buf, pos); pos += vl.len;
+      const val = buf.slice(pos, pos + vl.val); pos += vl.val;
+      entries.push({ key, val });
+    }
+    return { entries, pos: pos + 1 }; // skip 0x00
+  }
+
+  // Global map: find unsigned tx (key type 0x00)
+  const gm = readMap(psbt, i); i = gm.pos;
+  let unsignedTx = null;
+  for (const e of gm.entries) if (e.key[0] === 0x00) { unsignedTx = e.val; break; }
+  if (!unsignedTx) throw new Error('No unsigned tx in PSBT global map');
+
+  // Parse unsigned tx to count inputs/outputs
+  let tp = 0;
+  tp += 4; // version
+  const inCount = readVI(unsignedTx, tp); tp += inCount.len;
+  const nIns = inCount.val;
+
+  // Collect input data (txid, vout, seq)
+  const inputsData = [];
+  for (let k = 0; k < nIns; k++) {
+    const start = tp;
+    tp += 36; // txid(32) + vout(4)
+    const ssl = readVI(unsignedTx, tp); tp += ssl.len + ssl.val; // scriptSig
+    tp += 4; // sequence
+    inputsData.push(unsignedTx.slice(start, tp));
+  }
+  const outCount = readVI(unsignedTx, tp); tp += outCount.len;
+  const nOuts = outCount.val;
+  const outsStart = tp;
+  for (let k = 0; k < nOuts; k++) {
+    tp += 8;
+    const ssl = readVI(unsignedTx, tp); tp += ssl.len + ssl.val;
+  }
+  const rawOuts = unsignedTx.slice(outsStart, tp);
+  const locktime = unsignedTx.slice(tp, tp + 4);
+
+  // Per-input maps: find PARTIAL_SIG (key type 0x02) or FINAL_SCRIPTSIG/WITNESS
+  const sigs = [];
+  for (let k = 0; k < nIns; k++) {
+    const im = readMap(psbt, i); i = im.pos;
+    let sig = null, witness = null;
+    for (const e of im.entries) {
+      if (e.key[0] === 0x02) sig = e.val;         // PARTIAL_SIG
+      if (e.key[0] === 0x07) witness = e.val;     // FINAL_SCRIPTWITNESS
+    }
+    sigs.push({ sig, witness });
+  }
+
+  // Rebuild segwit tx: version | 0x00 0x01 | inputs | outputs | witness | locktime
+  const version = unsignedTx.slice(0, 4);
+  const segwitMarker = new Uint8Array([0x00, 0x01]);
+
+  // Build witness stack for each input
+  const witnesses = sigs.map(({ sig, witness }) => {
+    if (witness) return witness; // already serialized witness
+    if (sig) {
+      // P2WPKH: witness = [sig]  (pubkey provided separately but UniSat finalizes it)
+      return concat([new Uint8Array([0x01]), encodeVarInt(sig.length), sig]);
+    }
+    return new Uint8Array([0x00]); // empty witness
+  });
+
+  const rawTx = concat([
+    version,
+    segwitMarker,
+    encodeVarInt(nIns), ...inputsData,
+    encodeVarInt(nOuts), rawOuts,
+    ...witnesses,
+    locktime,
+  ]);
+
+  return bytesToHex(rawTx);
+}
+
+function psbtHexToRawTx(hexPsbt) {
+  return parsePsbtExtractTx(hexToBytes(hexPsbt));
 }
 
 // ─── broadcastRaw ────────────────────────────────────────────────────────────
 async function broadcastRaw(hexTx) {
-  const apis = NETWORK === 'testnet' ? [
-    'https://blockstream.info/testnet/api/tx',
-    'https://mempool.space/testnet/api/tx',
-  ] : [
-    'https://blockstream.info/api/tx',
-    'https://mempool.space/api/tx',
-  ];
+  const apis = NETWORK === 'testnet'
+    ? ['https://blockstream.info/testnet/api/tx', 'https://mempool.space/testnet/api/tx']
+    : ['https://blockstream.info/api/tx',         'https://mempool.space/api/tx'];
   for (const url of apis) {
     try {
-      const r = await fetch(url, { method: 'POST', body: hexTx, headers: { 'Content-Type': 'text/plain' } });
-      if (r.ok) {
-        const txid = (await r.text()).trim();
-        console.log('[BitMessage] broadcast ok via', url, txid);
-        return txid;
-      }
-      console.warn('[BitMessage] broadcast rejected by', url, await r.text());
-    } catch(e) {
-      console.warn('[BitMessage] broadcast error', url, e.message);
-    }
+      const r = await fetch(url, { method:'POST', body:hexTx, headers:{'Content-Type':'text/plain'} });
+      if (r.ok) return (await r.text()).trim();
+      console.warn('[BitMessage] rejected by', url, ':', await r.text());
+    } catch(e) { console.warn('[BitMessage] error at', url, e.message); }
   }
   throw new Error('All broadcast endpoints failed');
 }
 
-// buildPsbtHex — uses bitcoinjs-lib for correct PSBT construction
-async function buildPsbtHex(utxos, toAddress, amountSats, opReturnScript, feeRate) {
-  const selfAddr = String(STATE.wallet.address).trim();
-  const FEE      = Math.ceil((feeRate || STATE.feeRate || 2) * ESTIMATED_TX_VBYTES);
-  const need     = amountSats + FEE;
-
-  console.log('[BitMessage] buildPsbtHex — from:', selfAddr, 'to:', toAddress, 'amt:', amountSats, 'fee:', FEE);
-
-  // Coin selection
-  let selected = [], totalIn = 0;
-  for (const u of utxos) {
-    selected.push(u);
-    totalIn += u.value;
-    if (totalIn >= need) break;
-  }
-  if (totalIn < need) throw new Error(`Insufficient funds: have ${totalIn} sats, need ${need}`);
-  const changeAmt = totalIn - amountSats - FEE;
-
-  // Use bitcoinjs-lib if available, otherwise fall back to manual
-  if (typeof bitcoin !== 'undefined' && bitcoin.Psbt) {
-    console.log('[BitMessage] Using bitcoinjs-lib Psbt');
-    const network = NETWORK === 'testnet' ? bitcoin.networks.testnet : bitcoin.networks.bitcoin;
-    const psbt = new bitcoin.Psbt({ network });
-
-    // Inputs
-    for (const u of selected) {
-      psbt.addInput({
-        hash: u.txid,
-        index: u.vout,
-        witnessUtxo: {
-          script: bitcoin.address.toOutputScript(selfAddr, network),
-          value: u.value,
-        },
-      });
-    }
-
-    // Outputs
-    psbt.addOutput({ address: String(toAddress).trim(), value: amountSats });
-
-    if (opReturnScript) {
-      psbt.addOutput({ script: Buffer.from(opReturnScript), value: 0 });
-    }
-
-    if (changeAmt >= 546) {
-      psbt.addOutput({ address: selfAddr, value: changeAmt });
-    }
-
-    const hex = psbt.toHex();
-    console.log('[BitMessage] bitcoinjs PSBT hex starts:', hex.slice(0, 16));
-    return hex;
-
-  } else {
-    // Manual fallback (pure JS)
-    console.log('[BitMessage] bitcoinjs not available, using manual PSBT builder');
-    return buildPsbtManual(selected, toAddress, amountSats, opReturnScript, changeAmt, selfAddr);
-  }
-}
-
-function buildPsbtManual(selected, toAddress, amountSats, opReturnScript, changeAmt, selfAddr) {
-  // PSBT v0 structure (BIP174)
-  // Magic: 70736274ff
-  // Global map: key 0x00 = unsigned tx
-  // Input maps: key 0x01 = witness_utxo
-  // Output maps: empty
-
-  const w = (bytes) => { // write with varint length prefix
-    return concat([encodeVarInt(bytes.length), bytes]);
-  };
-
-  const selfScript = p2wpkhScript(selfAddr);
-
-  // Build unsigned tx
-  const ver  = uint32LE(2);
-  const lt   = uint32LE(0);
-  const seq  = uint32LE(0xffffffff);
-
-  const txIns  = selected.map(u => concat([hexToBytes(u.txid).reverse(), uint32LE(u.vout), new Uint8Array([0x00]), seq]));
-  const outputs = [];
-  outputs.push(buildTxOutputBytes(amountSats, p2wpkhScript(String(toAddress).trim())));
-  if (opReturnScript) outputs.push(buildTxOutputBytes(0, opReturnScript));
-  if (changeAmt >= 546) outputs.push(buildTxOutputBytes(changeAmt, selfScript));
-
-  const unsignedTx = concat([
-    ver,
-    encodeVarInt(txIns.length), ...txIns,
-    encodeVarInt(outputs.length), ...outputs,
-    lt,
-  ]);
-
-  const parts = [];
-  // Magic
-  parts.push(new Uint8Array([0x70, 0x73, 0x62, 0x74, 0xff]));
-  // Global: unsigned tx (key=0x00, 1 byte key)
-  parts.push(new Uint8Array([0x01, 0x00]));   // key length=1, key=0x00
-  parts.push(w(unsignedTx));                   // value = varint(len) + tx
-  parts.push(new Uint8Array([0x00]));           // end global map
-
-  // Per-input: witness_utxo (key type=0x01)
-  for (const u of selected) {
-    const witUtxo = buildTxOutputBytes(u.value, selfScript);
-    parts.push(new Uint8Array([0x01, 0x01]));  // key length=1, key=0x01
-    parts.push(w(witUtxo));
-    parts.push(new Uint8Array([0x00]));          // end input map
-  }
-
-  // Per-output: all empty
-  for (let i = 0; i < outputs.length; i++) parts.push(new Uint8Array([0x00]));
-
-  const totalLen  = parts.reduce((s, p) => s + p.length, 0);
-  const psbtBytes = new Uint8Array(totalLen);
-  let off = 0;
-  for (const p of parts) { psbtBytes.set(p, off); off += p.length; }
-
-  const hex = bytesToHex(psbtBytes);
-  console.log('[BitMessage] manual PSBT hex starts:', hex.slice(0, 16), 'len:', hex.length / 2);
-  return hex;
-}
-
-// P2WPKH script from bech32 address (tb1q... or bc1q...)
-function p2wpkhScript(address) {
-  address = String(address).trim();
-  // If bitcoinjs available
-  if (typeof bitcoin !== 'undefined') {
-    const network = NETWORK === 'testnet' ? bitcoin.networks.testnet : bitcoin.networks.bitcoin;
-    try { return bitcoin.address.toOutputScript(address, network); } catch(e) {}
-  }
-  // Manual bech32 decode
-  const decoded = bech32Decode(address);
-  if (decoded) {
-    const { witVer, witProg } = decoded;
-    return new Uint8Array([witVer === 0 ? 0x00 : (0x50 + witVer), witProg.length, ...witProg]);
-  }
-  // base58
-  return addressToScriptPubKey(address);
-}
 
 /* ═══════════════════════════════════════════════════
    SCRIPT UTILS

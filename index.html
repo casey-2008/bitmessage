@@ -949,7 +949,9 @@ async function connectWallet(type) {
       try { pubkey = await window.unisat.getPublicKey(); } catch(e) { console.warn('getPublicKey failed:', e); }
       console.log('[BitMessage] pubkey:', pubkey);
 
-      STATE.wallet = { type:'unisat', address: accounts[0], pubkey };
+      const addr = String(Array.isArray(accounts) ? accounts[0] : accounts).trim();
+      console.log('[BitMessage] UniSat address:', addr);
+      STATE.wallet = { type:'unisat', address: addr, pubkey };
       onWalletConnected();
       notify('Connected', truncate(accounts[0]), 'success');
     } catch(e) {
@@ -968,7 +970,9 @@ async function connectWallet(type) {
       if (!accounts || accounts.length === 0) throw new Error('No accounts returned');
       let pubkey = '';
       try { pubkey = await prov.getPublicKey(); } catch(_){}
-      STATE.wallet = { type:'opnet', address: accounts[0], pubkey };
+      const addr2 = String(Array.isArray(accounts) ? accounts[0] : accounts).trim();
+      console.log('[BitMessage] OP_NET address:', addr2);
+      STATE.wallet = { type:'opnet', address: addr2, pubkey };
       onWalletConnected();
       notify('Connected', truncate(accounts[0]), 'success');
     } catch(e) {
@@ -1380,7 +1384,13 @@ function normalizeSignedResult(raw) {
 }
 
 async function broadcastTx(hex) {
-  if (typeof hex !== 'string') hex = String(hex);
+  if (!hex) throw new Error('broadcastTx: empty transaction data');
+  if (typeof hex !== 'string') {
+    console.warn('[BitMessage] broadcastTx received non-string:', typeof hex, hex);
+    hex = String(hex);
+  }
+  hex = hex.trim();
+  console.log('[BitMessage] broadcastTx hex type:', typeof hex, 'starts:', hex.slice(0, 16));
 
   // Still a signed PSBT — let the wallet push it
   if (hex.startsWith('70736274')) {
@@ -1589,7 +1599,8 @@ async function buildPSBT(utxos, toAddress, amountSats, opReturnScript) {
   if (totalIn < need) throw new Error(`Insufficient: ${totalIn} sats available, ${need} needed`);
 
   const changeAmt = totalIn - amountSats - FEE;
-  const selfAddr  = STATE.wallet.address;
+  const selfAddr  = String(STATE.wallet.address).trim();
+  console.log('[BitMessage] buildPSBT selfAddr:', selfAddr, 'toAddr:', toAddress, 'amount:', amountSats);
 
   const outputs = [];
   outputs.push({ value: amountSats, script: addressToScriptPubKey(toAddress) });
@@ -1633,7 +1644,10 @@ async function buildPSBT(utxos, toAddress, amountSats, opReturnScript) {
    SCRIPT UTILS
 ═══════════════════════════════════════════════════ */
 function addressToScriptPubKey(address) {
-  if (!address) throw new Error('No address');
+  console.log('[BitMessage] addressToScriptPubKey input:', typeof address, address);
+  // Force to string — UniSat may return non-string in some versions
+  address = String(address).trim();
+  if (!address || address === 'undefined' || address === 'null') throw new Error('No valid address provided');
   if (address.startsWith('tb1') || address.startsWith('bc1')) {
     const decoded = bech32Decode(address);
     if (!decoded) throw new Error('Invalid bech32 address: ' + address);

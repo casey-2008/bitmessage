@@ -930,6 +930,7 @@ document.addEventListener('click', e => {
 });
 
 async function connectWallet(type) {
+  console.log('[BitMessage] connectWallet:', type);
   document.getElementById('walletMenu').classList.remove('open');
 
   if (type === 'unisat') {
@@ -939,39 +940,60 @@ async function connectWallet(type) {
     }
     try {
       notify('Connecting...', 'Approve in UniSat', 'info');
+      console.log('[BitMessage] calling requestAccounts...');
       const accounts = await window.unisat.requestAccounts();
-      const pubkey   = await window.unisat.getPublicKey();
-      STATE.wallet = { type:'unisat', address:accounts[0], pubkey };
+      console.log('[BitMessage] accounts:', accounts);
+      if (!accounts || accounts.length === 0) throw new Error('No accounts returned');
+
+      let pubkey = '';
+      try { pubkey = await window.unisat.getPublicKey(); } catch(e) { console.warn('getPublicKey failed:', e); }
+      console.log('[BitMessage] pubkey:', pubkey);
+
+      STATE.wallet = { type:'unisat', address: accounts[0], pubkey };
       onWalletConnected();
       notify('Connected', truncate(accounts[0]), 'success');
     } catch(e) {
+      console.error('[BitMessage] UniSat connect error:', e);
       notify('Failed', e.message || 'User rejected', 'error');
     }
+
   } else if (type === 'opnet') {
     await new Promise(r => setTimeout(r, 150));
     const prov = window.opnet || window.opwallet || null;
+    console.log('[BitMessage] OP_NET provider:', prov);
     if (!prov) { notify('OP_WALLET not found', 'Install OP_WALLET extension.', 'error'); return; }
     try {
       const accounts = await prov.requestAccounts();
+      console.log('[BitMessage] OP_NET accounts:', accounts);
+      if (!accounts || accounts.length === 0) throw new Error('No accounts returned');
       let pubkey = '';
       try { pubkey = await prov.getPublicKey(); } catch(_){}
-      STATE.wallet = { type:'opnet', address:accounts[0], pubkey };
+      STATE.wallet = { type:'opnet', address: accounts[0], pubkey };
       onWalletConnected();
       notify('Connected', truncate(accounts[0]), 'success');
     } catch(e) {
+      console.error('[BitMessage] OP_NET connect error:', e);
       notify('Failed', e.message || 'User rejected', 'error');
     }
   }
 }
 
 function onWalletConnected() {
-  const w = STATE.wallet;
-  const btn = document.getElementById('walletBtn');
-  btn.classList.add('connected');
-  document.getElementById('walletLabel').textContent = truncate(w.address, 8);
-  document.getElementById('disconnectItem').style.display = 'flex';
-  document.getElementById('sendBtn').disabled = false;
-  loadMessages();
+  console.log('[BitMessage] onWalletConnected:', STATE.wallet);
+  try {
+    const w = STATE.wallet;
+    const btn = document.getElementById('walletBtn');
+    btn.classList.add('connected');
+    document.getElementById('walletLabel').textContent = truncate(w.address, 8);
+    document.getElementById('disconnectItem').style.display = 'flex';
+    document.getElementById('sendBtn').disabled = false;
+    console.log('[BitMessage] UI updated, loading messages...');
+    loadMessages();
+    console.log('[BitMessage] onWalletConnected done');
+  } catch(e) {
+    console.error('[BitMessage] onWalletConnected error:', e);
+    notify('UI Error', e.message, 'error');
+  }
 }
 
 function disconnectWallet() {
@@ -1079,46 +1101,51 @@ function onMessageInput() {
   updatePreview();
 }
 
+function getEl(id) { return document.getElementById(id); }
+
 function updatePreview() {
-  const recipient = document.getElementById('f-recipient').value;
-  const msg       = document.getElementById('f-message').value;
-  const amountStr = document.getElementById('f-amount').value;
+  // Guard — elements may not exist yet (called from fetchFeeRate before DOM ready)
+  if (!getEl('f-recipient')) return;
+
+  const recipient = getEl('f-recipient').value;
+  const msg       = getEl('f-message').value;
+  const amountStr = getEl('f-amount').value;
   const amount    = parseInt(amountStr) || 0;
   const isEnc     = STATE.msgType === 'encrypted';
 
   // To address
-  document.getElementById('prevTo').textContent = recipient
-    ? 'To: ' + truncate(recipient, 10)
-    : 'To: —';
+  if (getEl('prevTo')) getEl('prevTo').textContent = recipient ? 'To: ' + truncate(recipient, 10) : 'To: —';
 
   // Message preview
-  const prevMsg = document.getElementById('prevMsg');
-  if (!msg) {
-    prevMsg.textContent = 'Your message here...';
-    prevMsg.className = 'mc-msg placeholder';
-  } else if (isEnc) {
-    prevMsg.textContent = '🔐 [encrypted · ' + new TextEncoder().encode(msg).length + ' bytes]';
-    prevMsg.className = 'mc-msg enc-preview';
-  } else {
-    prevMsg.textContent = msg;
-    prevMsg.className = 'mc-msg';
+  const prevMsg = getEl('prevMsg');
+  if (prevMsg) {
+    if (!msg) {
+      prevMsg.textContent = 'Your message here...';
+      prevMsg.className = 'mc-msg placeholder';
+    } else if (isEnc) {
+      prevMsg.textContent = '🔐 [encrypted · ' + new TextEncoder().encode(msg).length + ' bytes]';
+      prevMsg.className = 'mc-msg enc-preview';
+    } else {
+      prevMsg.textContent = msg;
+      prevMsg.className = 'mc-msg';
+    }
   }
 
   // Amount
   const btc = amount ? (amount / 1e8).toFixed(8) : '—';
-  document.getElementById('prevAmount').textContent = amount ? amount.toLocaleString() + ' sats' : '— sats';
-  document.getElementById('prevAmountBtc').textContent = '≈ ' + btc + ' BTC';
-  document.getElementById('amountBtc').textContent = amount ? '≈ ' + btc : '≈ 0 BTC';
+  if (getEl('prevAmount'))    getEl('prevAmount').textContent    = amount ? amount.toLocaleString() + ' sats' : '— sats';
+  if (getEl('prevAmountBtc')) getEl('prevAmountBtc').textContent = '≈ ' + btc + ' BTC';
+  if (getEl('amountBtc'))     getEl('amountBtc').textContent     = amount ? '≈ ' + btc : '≈ 0 BTC';
 
   // Total estimate
   const estFee = calcFee();
-  const total = amount ? (amount + estFee) : 0;
-  document.getElementById('prevTotal').textContent = total ? (total.toLocaleString() + ' sats') : '— sats';
+  const total  = amount ? (amount + estFee) : 0;
+  if (getEl('prevTotal')) getEl('prevTotal').textContent = total ? (total.toLocaleString() + ' sats') : '— sats';
 
-  // Enable button?
+  // Enable send button
   const bytes = new TextEncoder().encode(msg).length;
   const valid = STATE.wallet && recipient.trim() && msg.trim() && amount >= 546 && bytes <= MAX_MSG_BYTES;
-  document.getElementById('sendBtn').disabled = !valid;
+  if (getEl('sendBtn')) getEl('sendBtn').disabled = !valid;
 }
 
 /* ═══════════════════════════════════════════════════

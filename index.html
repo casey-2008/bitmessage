@@ -596,9 +596,9 @@ textarea.field-input.encrypted-mode {
 
 <!-- ═══ NAV ═══ -->
 <nav>
-  <div class="nav-tab active" onclick="showPage('send')">Send</div>
-  <div class="nav-tab" onclick="showPage('inbox')">Inbox</div>
-  <div class="nav-tab" onclick="showPage('about')">How It Works</div>
+  <div class="nav-tab active" onclick="showPage('send', this)">Send</div>
+  <div class="nav-tab" onclick="showPage('inbox', this)">Inbox</div>
+  <div class="nav-tab" onclick="showPage('about', this)">How It Works</div>
 </nav>
 
 <!-- ═══════════════════════
@@ -891,25 +891,28 @@ function calcFee() {
 }
 
 function updateFeeDisplay() {
-  const rate  = STATE.feeRate;
-  const total = calcFee();
-  const hint  = document.getElementById('feeHint');
-  if (hint) {
-    hint.innerHTML = rate
-      ? `Fee rate: <span style="color:var(--muted2)">${rate} sat/vB</span> · Est. fee: <span style="color:var(--muted2)">${total.toLocaleString()} sats</span> <span style="color:var(--muted)">(~${ESTIMATED_TX_VBYTES} vB)</span>`
-      : `Fetching fee rate...`;
-  }
-  updatePreview();
+  try {
+    const rate  = STATE.feeRate;
+    const total = calcFee();
+    const hint  = document.getElementById('feeHint');
+    if (hint) {
+      hint.innerHTML = rate
+        ? `Fee rate: <span style="color:var(--muted2)">${rate} sat/vB</span> · Est. fee: <span style="color:var(--muted2)">${total.toLocaleString()} sats</span> <span style="color:var(--muted)">(~${ESTIMATED_TX_VBYTES} vB)</span>`
+        : `Fetching fee rate...`;
+    }
+    updatePreview();
+  } catch(e) { console.warn('updateFeeDisplay error:', e); }
 }
 
 /* ═══════════════════════════════════════════════════
    NAVIGATION
 ═══════════════════════════════════════════════════ */
-function showPage(id) {
+function showPage(id, el) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
   document.getElementById('page-'+id).classList.add('active');
-  event.currentTarget.classList.add('active');
+  const target = el || (typeof event !== 'undefined' && event && event.currentTarget);
+  if (target) target.classList.add('active');
 }
 
 /* ═══════════════════════════════════════════════════
@@ -1677,4 +1680,59 @@ function uint32LE(n) {
   return b;
 }
 
-/* ═══════════════════════════════
+/* ═══════════════════════════════════════════════════
+   NOTIFICATIONS
+═══════════════════════════════════════════════════ */
+function notify(title, sub, type='info') {
+  const icons = { success:'✓', error:'✕', warning:'⚠', info:'ℹ' };
+  const wrap  = document.getElementById('notifWrap');
+  const el    = document.createElement('div');
+  el.className = `notif ${type}`;
+  el.innerHTML = `<div class="notif-icon">${icons[type]}</div>
+    <div><div class="notif-text">${title}</div>${sub ? `<div class="notif-sub">${sub}</div>` : ''}</div>`;
+  wrap.appendChild(el);
+  setTimeout(() => {
+    el.style.opacity = '0'; el.style.transform = 'translateX(20px)';
+    el.style.transition = 'all 0.3s';
+    setTimeout(() => el.remove(), 300);
+  }, 4000);
+}
+
+/* ═══════════════════════════════════════════════════
+   UTILS
+═══════════════════════════════════════════════════ */
+function truncate(str, n=12) {
+  if (!str) return '—';
+  if (str.length <= n*2+3) return str;
+  return str.slice(0,n) + '...' + str.slice(-6);
+}
+function timeAgo(ts) {
+  const s = Math.floor((Date.now()-ts)/1000);
+  if (s<60) return 'just now';
+  if (s<3600) return Math.floor(s/60)+'m ago';
+  if (s<86400) return Math.floor(s/3600)+'h ago';
+  return Math.floor(s/86400)+'d ago';
+}
+function escHtml(str) {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+/* ═══════════════════════════════════════════════════
+   INIT
+═══════════════════════════════════════════════════ */
+async function init() {
+  // Run independently — wallet connect must not depend on these
+  fetchBlock().catch(console.error);
+  setInterval(fetchBlock, 30000);
+
+  fetchFeeRate().catch(console.error);
+  setInterval(fetchFeeRate, 60000);
+
+  loadMessages();
+  updatePreview();
+}
+
+init();
+</script>
+</body>
+</html>

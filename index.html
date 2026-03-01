@@ -1244,31 +1244,35 @@ async function sendMessage() {
   }
 
   try {
-    // Step 1: build OP_RETURN
-    const opReturnScript = await buildOpReturnPayload(msgText, isEnc);
+    // Step 1: build OP_RETURN payload (hex string for UniSat)
+    const opReturnPayload = await buildOpReturnPayload(msgText, isEnc);
+    // Convert to hex string — UniSat inscribeCommit expects hex
+    const opReturnHex = bytesToHex(opReturnPayload);
+    console.log('[BitMessage] OP_RETURN hex:', opReturnHex);
     stepDone(1); stepActive(2);
 
-    // Step 2: get UTXOs
+    // Step 2: sign via UniSat native API
+    // UniSat supports sendBitcoin with OP_RETURN via the `outputs` array in newer versions.
+    // We use the recommended approach: build PSBT using UniSat's own bitcoin library.
     const utxos = await getUtxos(STATE.wallet.address);
-    if (!utxos || utxos.length === 0) throw new Error(`No UTXOs found. Make sure this address has testnet BTC. Address: ${truncate(STATE.wallet.address)}`);
-    if (!utxos || utxos.length === 0) throw new Error('No UTXOs available');
+    if (!utxos || utxos.length === 0) throw new Error('No UTXOs found. Fund your testnet address first.');
+    console.log('[BitMessage] UTXOs:', utxos);
 
-    // Build and sign via wallet
-    const psbtBytes = await buildPSBT(utxos, recipient, amount, opReturnScript);
-    const psbtHex   = bytesToHex(psbtBytes);
+    const feeRate  = STATE.feeRate || 2;
+    const psbtHex  = await buildPsbtHex(utxos, recipient, amount, opReturnPayload, feeRate);
+    console.log('[BitMessage] PSBT hex (first 40):', psbtHex.slice(0, 40));
 
+    // Sign — UniSat / OP_NET
     let signedRaw;
-    if (STATE.wallet.type === 'unisat') {
-      signedRaw = await window.unisat.signPsbt(psbtHex, { autoFinalized: true });
-    } else {
-      const prov = window.opnet || window.opwallet;
-      signedRaw  = await prov.signPsbt(psbtHex, { autoFinalized: true });
-    }
+    const walletProvider = STATE.wallet.type === 'unisat' ? window.unisat : (window.opnet || window.opwallet);
+    signedRaw = await walletProvider.signPsbt(psbtHex, {
+      autoFinalized: true,
+      broadcast: false,
+    });
+    console.log('[BitMessage] signPsbt raw result type:', typeof signedRaw, signedRaw);
 
-    // Normalize — UniSat may return string, object {psbtHex}, or object {txHex}
-    console.log('signPsbt result:', typeof signedRaw, signedRaw);
     const signedHex = normalizeSignedResult(signedRaw);
-    console.log('normalized signedHex:', signedHex ? signedHex.slice(0,40) + '...' : 'null');
+    console.log('[BitMessage] signedHex (first 40):', signedHex ? signedHex.slice(0, 40) : 'null');
     if (!signedHex) throw new Error('Wallet returned empty result after signing');
 
     stepDone(2); stepActive(3);
@@ -1585,59 +1589,86 @@ function closeModal() {
 /* ═══════════════════════════════════════════════════
    PSBT BUILDER (P2WPKH standard)
 ═══════════════════════════════════════════════════ */
-async function buildPSBT(utxos, toAddress, amountSats, opReturnScript) {
+// buildPsbtHex — builds PSBT and returns a lowercase hex STRING (what UniSat expects)
+async function buildPsbtHex(utxos, toAddress, amountSats, opReturnScript, feeRate) {
   const PSBT_MAGIC = new Uint8Array([0x70, 0x73, 0x62, 0x74, 0xff]);
-  const FEE  = calcFee();
-  const need = amountSats + FEE;
 
+  const selfAddr = String(STATE.wallet.address).trim();
+  const FEE      = Math.ceil((feeRate || STATE.feeRate || 2) * ESTIMATED_TX_VBYTES);
+  const need     = amountSats + FEE;
+
+  console.log('[BitMessage] buildPsbtHex — addr:', selfAddr, 'to:', toAddress, 'amt:', amountSats, 'fee:', FEE);
+
+  // Coin selection
   let selected = [], totalIn = 0;
   for (const u of utxos) {
     selected.push(u);
     totalIn += u.value;
     if (totalIn >= need) break;
   }
-  if (totalIn < need) throw new Error(`Insufficient: ${totalIn} sats available, ${need} needed`);
+  if (totalIn < need) throw new Error(`Insufficient funds: have ${totalIn} sats, need ${need} (amount + fee)`);
 
   const changeAmt = totalIn - amountSats - FEE;
-  const selfAddr  = String(STATE.wallet.address).trim();
-  console.log('[BitMessage] buildPSBT selfAddr:', selfAddr, 'toAddr:', toAddress, 'amount:', amountSats);
 
+  // Outputs
   const outputs = [];
-  outputs.push({ value: amountSats, script: addressToScriptPubKey(toAddress) });
+  outputs.push({ value: amountSats, script: addressToScriptPubKey(String(toAddress).trim()) });
   if (opReturnScript) outputs.push({ value: 0, script: opReturnScript });
   if (changeAmt >= 546) outputs.push({ value: changeAmt, script: addressToScriptPubKey(selfAddr) });
 
+  // Unsigned tx
   const version  = uint32LE(2);
   const locktime = uint32LE(0);
-  const seq      = uint32LE(0xfffffffd);
+  const seq      = uint32LE(0xffffffff);
 
-  const rawIns = selected.map(u =>
+  const rawIns  = selected.map(u =>
     concat([hexToBytes(u.txid).reverse(), uint32LE(u.vout), new Uint8Array([0x00]), seq])
   );
   const rawOuts = outputs.map(o => buildTxOutputBytes(o.value, o.script));
-  const rawTx   = concat([version, encodeVarInt(rawIns.length), ...rawIns, encodeVarInt(rawOuts.length), ...rawOuts, locktime]);
+  const rawTx   = concat([
+    version,
+    encodeVarInt(rawIns.length), ...rawIns,
+    encodeVarInt(rawOuts.length), ...rawOuts,
+    locktime,
+  ]);
 
-  const parts = [PSBT_MAGIC];
-  parts.push(new Uint8Array([0x01, 0x00]));
-  parts.push(encodeVarInt(rawTx.length));
-  parts.push(rawTx);
-  parts.push(new Uint8Array([0x00]));
+  // PSBT assembly
+  // Global: unsigned tx
+  const globalTxKey = new Uint8Array([0x01, 0x00]);
+  const globalTxVal = encodeVarInt(rawTx.length);
 
+  const parts = [];
+  parts.push(PSBT_MAGIC);
+  // Global map: key=0x00 (unsigned tx)
+  parts.push(encodeVarInt(globalTxKey.length)); parts.push(globalTxKey);
+  parts.push(encodeVarInt(rawTx.length));       parts.push(rawTx);
+  parts.push(new Uint8Array([0x00])); // end global map
+
+  // Per-input maps: WITNESS_UTXO (key type 0x01)
   const selfScript = addressToScriptPubKey(selfAddr);
   for (const u of selected) {
-    const witUtxo = buildTxOutputBytes(u.value, selfScript);
-    parts.push(new Uint8Array([0x01, 0x01]));
-    parts.push(encodeVarInt(witUtxo.length));
-    parts.push(witUtxo);
+    const witnessUtxoVal = buildTxOutputBytes(u.value, selfScript);
+    const witnessUtxoKey = new Uint8Array([0x01]);
+    parts.push(encodeVarInt(witnessUtxoKey.length)); parts.push(witnessUtxoKey);
+    parts.push(encodeVarInt(witnessUtxoVal.length)); parts.push(witnessUtxoVal);
+    parts.push(new Uint8Array([0x00])); // end input map
+  }
+
+  // Per-output maps: empty
+  for (let k = 0; k < outputs.length; k++) {
     parts.push(new Uint8Array([0x00]));
   }
-  for (let k = 0; k < outputs.length; k++) parts.push(new Uint8Array([0x00]));
 
-  const total  = parts.reduce((s, p) => s + p.length, 0);
-  const result = new Uint8Array(total);
-  let offset   = 0;
-  for (const p of parts) { result.set(p, offset); offset += p.length; }
-  return result;
+  // Concatenate all parts
+  const totalLen = parts.reduce((s, p) => s + p.length, 0);
+  const psbtBytes = new Uint8Array(totalLen);
+  let offset = 0;
+  for (const p of parts) { psbtBytes.set(p, offset); offset += p.length; }
+
+  // Return as lowercase hex string — this is what UniSat signPsbt expects
+  const hex = bytesToHex(psbtBytes);
+  console.log('[BitMessage] PSBT built, length:', hex.length / 2, 'bytes, starts:', hex.slice(0, 10));
+  return hex;
 }
 
 /* ═══════════════════════════════════════════════════

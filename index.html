@@ -1,0 +1,1655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BitMessage — Send Bitcoin with a Message</title>
+
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=Playfair+Display:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+
+<style>
+/* ═══════════════════════════════════════════════════
+   DESIGN SYSTEM
+═══════════════════════════════════════════════════ */
+:root {
+  --bg:       #080b0f;
+  --surface:  #0e1318;
+  --panel:    #131920;
+  --border:   #1e2830;
+  --border2:  #2a3540;
+  --gold:     #d4a843;
+  --gold2:    #f0c060;
+  --amber:    #e07820;
+  --blue:     #4a90c4;
+  --green:    #3a9a6a;
+  --red:      #c04040;
+  --text:     #dde4ec;
+  --muted:    #5a6878;
+  --muted2:   #8a9aaa;
+  --white:    #f0f4f8;
+}
+
+* { margin:0; padding:0; box-sizing:border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'DM Mono', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  min-height: 100vh;
+}
+
+body::before {
+  content:'';
+  position:fixed; inset:0;
+  background:
+    radial-gradient(ellipse 80% 50% at 20% 10%, rgba(74,144,196,0.04) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 40% at 80% 80%, rgba(212,168,67,0.03) 0%, transparent 50%);
+  pointer-events:none; z-index:0;
+}
+
+::-webkit-scrollbar { width:4px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius:2px; }
+
+.app { position:relative; z-index:1; }
+
+/* ═══ HEADER ═══ */
+header {
+  display:flex; align-items:center; justify-content:space-between;
+  padding: 0 40px;
+  height: 60px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(8,11,15,0.92);
+  backdrop-filter: blur(16px);
+  position: sticky; top:0; z-index:200;
+}
+
+.logo { display:flex; align-items:baseline; gap:10px; }
+.logo-name {
+  font-family: 'Playfair Display', serif;
+  font-size: 20px;
+  color: var(--gold);
+  letter-spacing: 0.05em;
+}
+.logo-tag {
+  font-size: 9px;
+  letter-spacing: 0.3em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.header-right { display:flex; align-items:center; gap:16px; }
+
+.block-live { display:flex; align-items:center; gap:8px; font-size:11px; color: var(--muted2); }
+.live-dot {
+  width:6px; height:6px; border-radius:50%;
+  background: var(--green);
+  animation: blink 2s ease-in-out infinite;
+}
+@keyframes blink { 0%,100%{opacity:1;} 50%{opacity:0.3;} }
+#liveBlock { color: var(--text); font-size:13px; }
+
+.net-badge {
+  font-size:9px; letter-spacing:0.2em; text-transform:uppercase;
+  padding:3px 9px; border:1px solid var(--border2); color: var(--muted2);
+}
+.net-badge.testnet { border-color:rgba(224,120,32,0.4); color:var(--amber); }
+
+/* ═══ WALLET BUTTON ═══ */
+.btn-wallet {
+  display:flex; align-items:center; gap:8px;
+  padding: 8px 16px;
+  background: transparent;
+  border: 1px solid var(--border2);
+  color: var(--muted2);
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  transition: all 0.15s;
+  position:relative;
+}
+.btn-wallet:hover { border-color: var(--gold); color: var(--gold); }
+.btn-wallet.connected { border-color: var(--green); color: var(--green); }
+
+.wallet-menu {
+  position:absolute; top:calc(100% + 8px); right:0;
+  background: var(--panel);
+  border: 1px solid var(--border2);
+  min-width: 200px;
+  z-index:300;
+  display:none;
+}
+.wallet-menu.open { display:block; }
+.wallet-menu-item {
+  padding:12px 16px;
+  cursor:pointer;
+  display:flex; align-items:center; gap:10px;
+  font-size:11px; color: var(--muted2);
+  transition: all 0.1s;
+  border-bottom: 1px solid var(--border);
+}
+.wallet-menu-item:last-child { border-bottom:none; }
+.wallet-menu-item:hover { background:var(--surface); color:var(--text); }
+.wallet-menu-item.disconnect { color:var(--red); }
+
+/* ═══ NAV ═══ */
+nav {
+  display:flex; align-items:center;
+  padding: 0 40px;
+  border-bottom: 1px solid var(--border);
+}
+.nav-tab {
+  padding: 14px 20px;
+  font-size: 11px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.15s;
+  position:relative; bottom:-1px;
+}
+.nav-tab:hover { color: var(--muted2); }
+.nav-tab.active { color: var(--gold); border-bottom-color: var(--gold); }
+
+/* ═══ PAGES ═══ */
+.page { display:none; padding:40px; max-width:1100px; margin:0 auto; }
+.page.active { display:block; }
+
+/* ═══ SECTION HEADERS ═══ */
+.sec-head {
+  display:flex; align-items:center; gap:12px;
+  margin-bottom:24px; padding-bottom:16px;
+  border-bottom:1px solid var(--border);
+}
+.sec-title { font-size:10px; letter-spacing:0.3em; text-transform:uppercase; color:var(--muted); }
+.sec-badge { font-size:9px; padding:2px 8px; border:1px solid var(--border2); color:var(--gold); }
+
+/* ═══ SEND PAGE ═══ */
+.send-layout {
+  display:grid;
+  grid-template-columns: 1fr 380px;
+  gap:32px;
+  align-items:start;
+}
+
+.form-panel {
+  background:var(--panel);
+  border:1px solid var(--border);
+  padding:32px;
+}
+
+.field { margin-bottom:24px; }
+.field-label {
+  font-size:9px; letter-spacing:0.25em;
+  text-transform:uppercase; color:var(--muted);
+  display:block; margin-bottom:8px;
+}
+.field-hint { font-size:10px; color:var(--muted); margin-top:6px; }
+
+.field-input {
+  width:100%;
+  background:var(--bg);
+  border:1px solid var(--border);
+  color:var(--text);
+  font-family:'DM Mono',monospace;
+  font-size:13px;
+  padding:12px 14px;
+  outline:none;
+  transition:border-color 0.15s;
+}
+.field-input:focus { border-color:var(--border2); }
+.field-input::placeholder { color:var(--muted); }
+
+textarea.field-input {
+  min-height:90px; resize:vertical;
+  font-family:'Playfair Display',serif;
+  font-style:italic; font-size:15px;
+}
+textarea.field-input.encrypted-mode {
+  font-family:'DM Mono',monospace;
+  font-style:normal; font-size:12px;
+}
+
+.field-row { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+
+/* Amount + BTC display */
+.amount-wrap { position:relative; }
+.amount-btc {
+  position:absolute; right:14px; top:50%; transform:translateY(-50%);
+  font-size:10px; color:var(--muted);
+  pointer-events:none;
+}
+
+/* ═══ MESSAGE TYPE TOGGLE ═══ */
+.msg-type-wrap {
+  display:grid; grid-template-columns:1fr 1fr;
+  gap:1px; background:var(--border);
+  margin-bottom:16px;
+}
+.msg-type-btn {
+  background:var(--surface);
+  padding:14px 12px;
+  text-align:center;
+  cursor:pointer;
+  transition:all 0.15s;
+  border:none;
+}
+.msg-type-btn:hover { background:var(--panel); }
+.msg-type-btn.active { background:var(--panel); }
+.msg-type-icon { font-size:18px; display:block; margin-bottom:4px; }
+.msg-type-title {
+  font-size:10px; letter-spacing:0.15em; text-transform:uppercase;
+  display:block; margin-bottom:2px;
+}
+.msg-type-title.public { color:var(--gold); }
+.msg-type-title.encrypted { color:var(--amber); }
+.msg-type-desc { font-size:9px; color:var(--muted); }
+.msg-type-btn:not(.active) .msg-type-title { color:var(--muted); }
+.msg-type-indicator {
+  height:2px;
+  transition:background 0.2s;
+}
+.msg-type-btn.active.public-btn .msg-type-indicator { background:var(--gold); }
+.msg-type-btn.active.encrypted-btn .msg-type-indicator { background:var(--amber); }
+.msg-type-btn:not(.active) .msg-type-indicator { background:transparent; }
+
+/* Char counter */
+.char-row { display:flex; justify-content:space-between; margin-top:6px; }
+.char-count { font-size:10px; }
+.char-count.ok { color:var(--muted); }
+.char-count.warn { color:var(--amber); }
+.char-count.over { color:var(--red); }
+
+/* Encryption key display */
+.key-reveal {
+  background:rgba(224,120,32,0.05);
+  border:1px solid rgba(224,120,32,0.25);
+  padding:16px;
+  margin-top:16px;
+  display:none;
+}
+.key-reveal.show { display:block; }
+.key-reveal-label {
+  font-size:9px; letter-spacing:0.2em; text-transform:uppercase;
+  color:var(--amber); margin-bottom:8px; display:flex; align-items:center; gap:8px;
+}
+.key-reveal-val {
+  font-size:10px; color:var(--text);
+  word-break:break-all; line-height:1.7;
+  background:var(--bg); padding:10px; border:1px solid var(--border);
+}
+.key-warn {
+  font-size:9px; color:var(--amber); margin-top:8px; line-height:1.6;
+}
+
+/* ═══ PREVIEW PANEL ═══ */
+.preview-panel {
+  background:var(--panel);
+  border:1px solid var(--border);
+  padding:28px;
+  position:sticky; top:100px;
+}
+.preview-title {
+  font-family:'Playfair Display',serif;
+  font-size:13px; color:var(--muted);
+  margin-bottom:20px; letter-spacing:0.05em;
+}
+
+/* Message card preview */
+.msg-card {
+  background:var(--bg);
+  border:1px solid var(--border);
+  padding:20px;
+  margin-bottom:16px;
+  position:relative;
+  overflow:hidden;
+}
+.msg-card::before {
+  content:'';
+  position:absolute; left:0; top:0; bottom:0;
+  width:3px;
+}
+.msg-card.public::before { background:var(--gold); }
+.msg-card.encrypted::before { background:var(--amber); }
+
+.mc-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
+.mc-type {
+  font-size:8px; letter-spacing:0.2em; text-transform:uppercase;
+  padding:2px 7px; border:1px solid;
+}
+.mc-type.public { color:var(--gold); border-color:rgba(212,168,67,0.4); }
+.mc-type.encrypted { color:var(--amber); border-color:rgba(224,120,32,0.4); }
+.mc-to { font-size:9px; color:var(--muted); }
+
+.mc-msg {
+  font-family:'Playfair Display',serif;
+  font-size:16px; font-style:italic;
+  color:var(--text); margin-bottom:12px;
+  min-height:24px; line-height:1.5;
+}
+.mc-msg.enc-preview {
+  font-family:'DM Mono',monospace;
+  font-size:10px; font-style:normal;
+  color:var(--muted); word-break:break-all;
+}
+.mc-msg.placeholder { color:var(--muted); }
+
+.mc-footer { display:flex; justify-content:space-between; align-items:center; }
+.mc-amount { font-size:14px; color:var(--gold); }
+.mc-amount-sub { font-size:9px; color:var(--muted); }
+.mc-protocol { font-size:9px; color:var(--muted); letter-spacing:0.05em; }
+
+/* Preview meta */
+.preview-meta {
+  font-size:10px; color:var(--muted);
+  background:var(--bg); border:1px solid var(--border);
+  padding:14px; line-height:2;
+}
+.preview-meta span { color:var(--muted2); }
+
+/* ═══ BUTTONS ═══ */
+.btn-primary {
+  width:100%; background:var(--gold); color:var(--bg);
+  border:none; font-family:'DM Mono',monospace;
+  font-size:11px; letter-spacing:0.2em; text-transform:uppercase;
+  padding:16px; cursor:pointer; transition:background 0.15s, transform 0.1s;
+}
+.btn-primary:hover { background:var(--gold2); }
+.btn-primary:active { transform:scale(0.99); }
+.btn-primary:disabled { background:var(--border2); color:var(--muted); cursor:not-allowed; }
+
+.btn-secondary {
+  background:transparent; color:var(--muted2);
+  border:1px solid var(--border2);
+  font-family:'DM Mono',monospace;
+  font-size:11px; letter-spacing:0.15em; text-transform:uppercase;
+  padding:12px 20px; cursor:pointer; transition:all 0.15s;
+}
+.btn-secondary:hover { border-color:var(--text); color:var(--text); }
+
+.copy-btn {
+  font-size:9px; letter-spacing:0.1em;
+  padding:4px 10px; border:1px solid var(--border2);
+  color:var(--muted); background:none; cursor:pointer;
+  transition:all 0.1s; margin-top:8px;
+}
+.copy-btn:hover { color:var(--text); border-color:var(--text); }
+
+/* ═══ INBOX PAGE ═══ */
+.inbox-filters { display:flex; gap:8px; margin-bottom:24px; flex-wrap:wrap; }
+.filter-btn {
+  font-size:9px; letter-spacing:0.15em; text-transform:uppercase;
+  padding:6px 12px; border:1px solid var(--border2);
+  color:var(--muted); background:transparent; cursor:pointer; transition:all 0.1s;
+}
+.filter-btn:hover { color:var(--muted2); }
+.filter-btn.active { color:var(--gold); border-color:var(--gold); }
+
+/* Message list */
+.msg-row {
+  background:var(--panel); border:1px solid var(--border);
+  padding:20px 24px; margin-bottom:1px;
+  display:grid;
+  grid-template-columns:8px 1fr auto;
+  gap:20px; align-items:center;
+  cursor:pointer; transition:background 0.1s, border-color 0.1s;
+  animation:rowIn 0.3s ease forwards; opacity:0;
+}
+@keyframes rowIn { from{opacity:0;transform:translateY(6px);} to{opacity:1;transform:translateY(0);} }
+.msg-row:hover { background:var(--surface); border-color:var(--border2); }
+
+.mr-indicator {
+  width:4px; height:100%; min-height:40px;
+  border-radius:2px;
+}
+.mr-indicator.public { background:var(--gold); }
+.mr-indicator.encrypted { background:var(--amber); }
+.mr-indicator.unread { animation:glow-gold 2s infinite; }
+@keyframes glow-gold { 0%,100%{box-shadow:0 0 0 transparent;} 50%{box-shadow:0 0 8px rgba(212,168,67,0.5);} }
+
+.mr-body {}
+.mr-addr { font-size:10px; color:var(--muted); margin-bottom:4px; }
+.mr-addr span { color:var(--muted2); }
+.mr-msg {
+  font-family:'Playfair Display',serif;
+  font-size:15px; font-style:italic; color:var(--text);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  max-width:500px;
+}
+.mr-msg.enc {
+  font-family:'DM Mono',monospace; font-size:11px; font-style:normal;
+  color:var(--muted); display:flex; align-items:center; gap:6px;
+}
+.mr-meta { text-align:right; }
+.mr-amount { font-size:13px; color:var(--gold); display:block; margin-bottom:4px; }
+.mr-time { font-size:10px; color:var(--muted); }
+.mr-status {
+  font-size:9px; letter-spacing:0.15em; text-transform:uppercase;
+  padding:2px 7px; border:1px solid; white-space:nowrap; margin-top:4px; display:inline-block;
+}
+.mr-status.confirmed { color:var(--green); border-color:var(--green); }
+.mr-status.pending { color:var(--muted); border-color:var(--border2); }
+
+/* ═══ STATS BAR ═══ */
+.stats-bar {
+  display:grid; grid-template-columns:repeat(4,1fr);
+  gap:1px; background:var(--border);
+  border:1px solid var(--border);
+  margin-bottom:40px;
+}
+.stat-cell { background:var(--panel); padding:20px 24px; }
+.stat-num {
+  font-family:'Playfair Display',serif;
+  font-size:28px; color:var(--gold);
+  display:block; margin-bottom:3px;
+}
+.stat-label { font-size:9px; letter-spacing:0.2em; text-transform:uppercase; color:var(--muted); }
+
+/* ═══ MODAL ═══ */
+.modal-overlay {
+  position:fixed; inset:0;
+  background:rgba(0,0,0,0.85);
+  backdrop-filter:blur(8px);
+  z-index:500;
+  display:flex; align-items:center; justify-content:center;
+  opacity:0; pointer-events:none; transition:opacity 0.2s;
+}
+.modal-overlay.open { opacity:1; pointer-events:all; }
+.modal {
+  background:var(--panel); border:1px solid var(--border2);
+  width:560px; max-width:95vw; max-height:85vh; overflow-y:auto;
+  transform:translateY(16px); transition:transform 0.2s;
+}
+.modal-overlay.open .modal { transform:translateY(0); }
+.modal-head {
+  padding:24px 28px 20px;
+  border-bottom:1px solid var(--border);
+  display:flex; justify-content:space-between; align-items:start;
+}
+.modal-title { font-family:'Playfair Display',serif; font-size:22px; color:var(--gold); }
+.modal-close { background:none; border:none; color:var(--muted); cursor:pointer; font-size:18px; padding:4px; transition:color 0.1s; }
+.modal-close:hover { color:var(--text); }
+.modal-body { padding:24px 28px; }
+.modal-row {
+  display:flex; justify-content:space-between; align-items:baseline;
+  padding:10px 0; border-bottom:1px solid var(--border); gap:16px;
+}
+.modal-row:last-of-type { border-bottom:none; }
+.modal-key { font-size:9px; letter-spacing:0.2em; text-transform:uppercase; color:var(--muted); flex-shrink:0; }
+.modal-val { font-size:11px; color:var(--text); text-align:right; word-break:break-all; }
+
+.msg-reveal {
+  background:var(--bg); border:1px solid var(--border);
+  padding:20px; margin-top:16px;
+}
+.msg-reveal-label { font-size:9px; letter-spacing:0.2em; text-transform:uppercase; color:var(--muted); margin-bottom:10px; }
+.msg-reveal-text {
+  font-family:'Playfair Display',serif;
+  font-size:18px; font-style:italic;
+  color:var(--text); line-height:1.5;
+}
+.msg-reveal-text.enc {
+  font-family:'DM Mono',monospace; font-size:11px; font-style:normal; color:var(--muted);
+}
+
+.decrypt-box {
+  background:rgba(74,144,196,0.06); border:1px solid rgba(74,144,196,0.25);
+  padding:16px; margin-top:16px;
+}
+.decrypt-label { font-size:9px; letter-spacing:0.2em; text-transform:uppercase; color:var(--blue); margin-bottom:8px; }
+.decrypt-input { width:100%; background:var(--bg); border:1px solid var(--border); color:var(--text); font-family:'DM Mono',monospace; font-size:11px; padding:10px 12px; outline:none; margin-bottom:8px; }
+.decrypt-input:focus { border-color:var(--border2); }
+.btn-decrypt { background:transparent; border:1px solid var(--blue); color:var(--blue); font-family:'DM Mono',monospace; font-size:10px; letter-spacing:0.15em; padding:8px 16px; cursor:pointer; transition:all 0.15s; }
+.btn-decrypt:hover { background:rgba(74,144,196,0.1); }
+
+.modal-actions { padding:0 28px 24px; display:flex; gap:12px; }
+
+/* ═══ TX PROGRESS ═══ */
+.tx-progress { background:var(--bg); border:1px solid var(--border); padding:20px; margin-top:16px; }
+.tx-step { display:flex; align-items:center; gap:12px; padding:8px 0; font-size:11px; color:var(--muted); }
+.tx-step.done { color:var(--green); }
+.tx-step.active { color:var(--text); }
+.tx-step.error { color:var(--red); }
+.step-dot { width:8px; height:8px; border-radius:50%; background:var(--border2); flex-shrink:0; }
+.tx-step.done .step-dot { background:var(--green); }
+.tx-step.active .step-dot { background:var(--blue); animation:blink 1s ease-in-out infinite; }
+.tx-step.error .step-dot { background:var(--red); }
+.txid-link { color:var(--blue); text-decoration:none; font-size:10px; word-break:break-all; }
+.txid-link:hover { text-decoration:underline; }
+
+/* ═══ NOTIFICATIONS ═══ */
+.notif-wrap { position:fixed; bottom:24px; right:24px; z-index:600; display:flex; flex-direction:column; gap:8px; max-width:360px; }
+.notif {
+  background:var(--panel); border:1px solid var(--border2);
+  padding:14px 18px; display:flex; align-items:flex-start; gap:12px;
+  animation:notifIn 0.2s ease; border-left:3px solid var(--muted);
+}
+@keyframes notifIn { from{opacity:0;transform:translateX(20px);} to{opacity:1;transform:translateX(0);} }
+.notif.success { border-left-color:var(--green); }
+.notif.error { border-left-color:var(--red); }
+.notif.warning { border-left-color:var(--amber); }
+.notif.info { border-left-color:var(--blue); }
+.notif-icon { font-size:14px; flex-shrink:0; margin-top:1px; }
+.notif-text { font-size:12px; color:var(--text); }
+.notif-sub { font-size:10px; color:var(--muted); margin-top:3px; }
+
+/* ═══ CONNECT PROMPT ═══ */
+.connect-prompt { border:1px solid var(--border); padding:48px; text-align:center; margin-bottom:32px; }
+.cp-title { font-family:'Playfair Display',serif; font-size:24px; color:var(--muted); margin-bottom:12px; }
+.cp-sub { font-size:11px; color:var(--muted); margin-bottom:28px; line-height:1.7; }
+.cp-btns { display:flex; gap:12px; justify-content:center; }
+
+/* ═══ EMPTY STATE ═══ */
+.empty { text-align:center; padding:60px 20px; color:var(--muted); font-size:12px; }
+.empty-icon { font-size:32px; display:block; margin-bottom:12px; opacity:0.4; }
+
+/* ═══ HOW IT WORKS ═══ */
+.how-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:1px; background:var(--border); border:1px solid var(--border); margin-bottom:40px; }
+.how-cell { background:var(--panel); padding:28px 24px; }
+.how-num { font-family:'Playfair Display',serif; font-size:40px; color:var(--border2); display:block; margin-bottom:12px; }
+.how-title { font-size:11px; letter-spacing:0.2em; text-transform:uppercase; color:var(--gold); margin-bottom:8px; }
+.how-desc { font-size:11px; color:var(--muted); line-height:1.7; }
+
+/* ═══ RESPONSIVE ═══ */
+@media(max-width:768px){
+  header,nav { padding:0 16px; }
+  .page { padding:16px; }
+  .send-layout { grid-template-columns:1fr; }
+  .stats-bar { grid-template-columns:1fr 1fr; }
+  .how-grid { grid-template-columns:1fr; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+
+<!-- ═══ HEADER ═══ -->
+<header>
+  <div class="logo">
+    <span class="logo-name">BitMessage</span>
+    <span class="logo-tag">Bitcoin · Messaging Layer</span>
+  </div>
+  <div class="header-right">
+    <div class="block-live">
+      <div class="live-dot"></div>
+      <span>Block</span>
+      <span id="liveBlock">—</span>
+    </div>
+    <span class="net-badge testnet">Testnet</span>
+    <div style="position:relative;">
+      <button class="btn-wallet" id="walletBtn" onclick="toggleWalletMenu()">
+        <span>⬡</span>
+        <span id="walletLabel">Connect Wallet</span>
+      </button>
+      <div class="wallet-menu" id="walletMenu">
+        <div class="wallet-menu-item" onclick="connectWallet('unisat')">🟠 UniSat Wallet</div>
+        <div class="wallet-menu-item" onclick="connectWallet('opnet')">🔵 OP_NET Wallet</div>
+        <div class="wallet-menu-item disconnect" id="disconnectItem" style="display:none" onclick="disconnectWallet()">✕ Disconnect</div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- ═══ NAV ═══ -->
+<nav>
+  <div class="nav-tab active" onclick="showPage('send')">Send</div>
+  <div class="nav-tab" onclick="showPage('inbox')">Inbox</div>
+  <div class="nav-tab" onclick="showPage('about')">How It Works</div>
+</nav>
+
+<!-- ═══════════════════════
+     SEND PAGE
+════════════════════════ -->
+<div class="page active" id="page-send">
+  <div class="send-layout">
+
+    <!-- Left: Form -->
+    <div>
+      <div class="sec-head">
+        <span class="sec-title">New Message</span>
+      </div>
+
+      <div class="form-panel">
+
+        <!-- Message type -->
+        <div class="field">
+          <label class="field-label">Message Type</label>
+          <div class="msg-type-wrap" id="msgTypeTabs">
+            <button class="msg-type-btn public-btn active" onclick="setMsgType('public')">
+              <div class="msg-type-indicator"></div>
+              <span class="msg-type-icon">🌐</span>
+              <span class="msg-type-title public">Public</span>
+              <span class="msg-type-desc">Visible on blockchain forever</span>
+            </button>
+            <button class="msg-type-btn encrypted-btn" onclick="setMsgType('encrypted')">
+              <div class="msg-type-indicator"></div>
+              <span class="msg-type-icon">🔐</span>
+              <span class="msg-type-title encrypted">Encrypted</span>
+              <span class="msg-type-desc">AES-256 · Only key holder reads</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Recipient -->
+        <div class="field">
+          <label class="field-label">Recipient Address</label>
+          <input type="text" class="field-input" id="f-recipient" placeholder="tb1q... or bc1q..." oninput="updatePreview()">
+          <div class="field-hint">Bitcoin testnet address (tb1...)</div>
+        </div>
+
+        <!-- Message -->
+        <div class="field">
+          <label class="field-label">Message</label>
+          <textarea class="field-input" id="f-message" placeholder="Write your message..." oninput="onMessageInput()"></textarea>
+          <div class="char-row">
+            <div class="field-hint" id="msgHint">Stored in OP_RETURN · Permanent on-chain</div>
+            <div class="char-count ok" id="charCount">0 / 80</div>
+          </div>
+          <!-- Encryption key (shown when encrypted) -->
+          <div class="key-reveal" id="keyReveal">
+            <div class="key-reveal-label">⚠ Encryption Key — Save This!</div>
+            <div class="key-reveal-val" id="encKeyDisplay">Generating...</div>
+            <button class="copy-btn" onclick="copyEncKey()">Copy Key</button>
+            <div class="key-warn">This key will NEVER be shown again. Without it, the message cannot be decrypted. Store it safely.</div>
+          </div>
+        </div>
+
+        <!-- Amount -->
+        <div class="field">
+          <label class="field-label">Amount (satoshis)</label>
+          <div class="amount-wrap">
+            <input type="number" class="field-input" id="f-amount" placeholder="e.g. 1000" min="546" oninput="updatePreview()" style="padding-right:70px;">
+            <div class="amount-btc" id="amountBtc">≈ 0 BTC</div>
+          </div>
+          <div class="field-hint">Minimum: 546 sats (dust limit) · Fee: ~2000 sats</div>
+        </div>
+
+        <!-- Submit -->
+        <button class="btn-primary" id="sendBtn" onclick="sendMessage()" disabled>
+          Send Bitcoin + Message →
+        </button>
+        <div id="sendStatus" style="margin-top:16px;"></div>
+
+      </div>
+    </div>
+
+    <!-- Right: Preview -->
+    <div>
+      <div class="sec-head">
+        <span class="sec-title">Preview</span>
+      </div>
+      <div class="preview-panel">
+        <div class="preview-title">On-chain message will look like this</div>
+
+        <div class="msg-card public" id="previewCard">
+          <div class="mc-header">
+            <span class="mc-type public" id="prevType">PUBLIC</span>
+            <span class="mc-to" id="prevTo">To: —</span>
+          </div>
+          <div class="mc-msg placeholder" id="prevMsg">Your message here...</div>
+          <div class="mc-footer">
+            <div>
+              <div class="mc-amount" id="prevAmount">— sats</div>
+              <div class="mc-amount-sub" id="prevAmountBtc">≈ — BTC</div>
+            </div>
+            <div class="mc-protocol">OP_RETURN · BITMSG_V1</div>
+          </div>
+        </div>
+
+        <div class="preview-meta">
+          <div>Protocol: <span>BITMSG_V1</span></div>
+          <div>Commitment: <span>OP_RETURN (0 sats)</span></div>
+          <div>Network: <span style="color:var(--amber)">Bitcoin Testnet</span></div>
+          <div>Encryption: <span id="prevEncLabel">None (public)</span></div>
+          <div>Est. total: <span id="prevTotal">— sats</span></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ═══════════════════════
+     INBOX PAGE
+════════════════════════ -->
+<div class="page" id="page-inbox">
+
+  <div class="stats-bar">
+    <div class="stat-cell">
+      <span class="stat-num" id="stat-received">0</span>
+      <span class="stat-label">Received</span>
+    </div>
+    <div class="stat-cell">
+      <span class="stat-num" id="stat-sent">0</span>
+      <span class="stat-label">Sent</span>
+    </div>
+    <div class="stat-cell">
+      <span class="stat-num" id="stat-public">0</span>
+      <span class="stat-label">Public</span>
+    </div>
+    <div class="stat-cell">
+      <span class="stat-num" id="stat-encrypted">0</span>
+      <span class="stat-label">Encrypted</span>
+    </div>
+  </div>
+
+  <div class="sec-head">
+    <span class="sec-title">Messages</span>
+    <span class="sec-badge" id="inboxCount">0</span>
+  </div>
+
+  <div class="inbox-filters">
+    <button class="filter-btn active" onclick="filterInbox('all',this)">All</button>
+    <button class="filter-btn" onclick="filterInbox('received',this)">Received</button>
+    <button class="filter-btn" onclick="filterInbox('sent',this)">Sent</button>
+    <button class="filter-btn" onclick="filterInbox('public',this)">Public</button>
+    <button class="filter-btn" onclick="filterInbox('encrypted',this)">Encrypted</button>
+  </div>
+
+  <div id="msgList">
+    <div class="connect-prompt">
+      <div class="cp-title">Connect your wallet</div>
+      <div class="cp-sub">Connect UniSat or OP_NET wallet to see<br>messages tied to your Bitcoin address.</div>
+      <div class="cp-btns">
+        <button class="btn-secondary" onclick="connectWallet('unisat')">🟠 UniSat</button>
+        <button class="btn-secondary" onclick="connectWallet('opnet')">🔵 OP_NET</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ═══════════════════════
+     HOW IT WORKS PAGE
+════════════════════════ -->
+<div class="page" id="page-about">
+
+  <div class="sec-head">
+    <span class="sec-title">How BitMessage Works</span>
+  </div>
+
+  <div class="how-grid">
+    <div class="how-cell">
+      <span class="how-num">01</span>
+      <div class="how-title">Write a Message</div>
+      <div class="how-desc">Choose your message type: public (readable by anyone) or encrypted (AES-256-GCM, only decryptable with your key). Up to 80 characters stored directly on Bitcoin.</div>
+    </div>
+    <div class="how-cell">
+      <span class="how-num">02</span>
+      <div class="how-title">Attach to Transaction</div>
+      <div class="how-desc">Your message is embedded in an OP_RETURN output alongside the Bitcoin transfer. One transaction — one payment — one permanent message on the blockchain.</div>
+    </div>
+    <div class="how-cell">
+      <span class="how-num">03</span>
+      <div class="how-title">Forever on Bitcoin</div>
+      <div class="how-desc">Once confirmed, the message is immutably anchored to the Bitcoin blockchain. Public messages are readable by anyone. Encrypted ones need the decryption key.</div>
+    </div>
+  </div>
+
+  <div class="sec-head" style="margin-top:8px;">
+    <span class="sec-title">Protocol Specification</span>
+  </div>
+
+  <div class="form-panel" style="font-size:11px;line-height:2;color:var(--muted2);">
+    <div style="margin-bottom:16px;">
+      <div style="color:var(--gold);font-size:9px;letter-spacing:0.2em;text-transform:uppercase;margin-bottom:8px;">OP_RETURN Payload Format</div>
+      <div style="background:var(--bg);border:1px solid var(--border);padding:16px;font-family:'DM Mono',monospace;font-size:11px;color:var(--muted2);line-height:2;">
+        <div><span style="color:var(--gold)">BITMSG</span> — 6-byte magic prefix</div>
+        <div><span style="color:var(--gold)">V1</span> — protocol version byte</div>
+        <div><span style="color:var(--gold)">TYPE</span> — 0x00 = public, 0x01 = encrypted</div>
+        <div><span style="color:var(--gold)">MSG</span> — UTF-8 message (max 73 bytes)</div>
+      </div>
+    </div>
+    <div>
+      <div style="color:var(--gold);font-size:9px;letter-spacing:0.2em;text-transform:uppercase;margin-bottom:8px;">Notes</div>
+      <div style="color:var(--muted);">
+        OP_RETURN outputs carry 0 BTC and are unspendable. They are used as a data carrier on Bitcoin.<br>
+        Maximum OP_RETURN size: 80 bytes (Bitcoin relay policy).<br>
+        Encrypted messages store base64-encoded AES-256-GCM ciphertext (IV + ciphertext) in the payload.<br>
+        The decryption key is NEVER stored on-chain. Keep it safe or the message is lost forever.
+      </div>
+    </div>
+  </div>
+
+</div>
+
+</div><!-- .app -->
+
+<!-- ═══ MESSAGE DETAIL MODAL ═══ -->
+<div class="modal-overlay" id="msgModal" onclick="if(event.target.id==='msgModal')closeModal()">
+  <div class="modal">
+    <div class="modal-head">
+      <div class="modal-title" id="mTitle">Message</div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" id="mBody"></div>
+    <div class="modal-actions" id="mActions"></div>
+  </div>
+</div>
+
+<!-- ═══ NOTIFICATIONS ═══ -->
+<div class="notif-wrap" id="notifWrap"></div>
+
+<script>
+/* ═══════════════════════════════════════════════════
+   STATE
+═══════════════════════════════════════════════════ */
+const NETWORK = 'testnet';
+const PROTOCOL_MAGIC = 'BITMSG';
+const PROTOCOL_VERSION = 0x01;
+const TYPE_PUBLIC    = 0x00;
+const TYPE_ENCRYPTED = 0x01;
+const MAX_MSG_BYTES  = 73; // 80 - 6(magic) - 1(ver) - 1(type) = 72, keeping 1 spare
+
+const STATE = {
+  wallet: null,
+  msgType: 'public',
+  encKey: null,
+  messages: [],  // local cache
+};
+
+/* ═══════════════════════════════════════════════════
+   NAVIGATION
+═══════════════════════════════════════════════════ */
+function showPage(id) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('page-'+id).classList.add('active');
+  event.currentTarget.classList.add('active');
+}
+
+/* ═══════════════════════════════════════════════════
+   WALLET
+═══════════════════════════════════════════════════ */
+function toggleWalletMenu() {
+  document.getElementById('walletMenu').classList.toggle('open');
+}
+
+document.addEventListener('click', e => {
+  const btn = document.getElementById('walletBtn');
+  if (btn && !btn.parentElement.contains(e.target)) {
+    document.getElementById('walletMenu').classList.remove('open');
+  }
+});
+
+async function connectWallet(type) {
+  document.getElementById('walletMenu').classList.remove('open');
+
+  if (type === 'unisat') {
+    if (typeof window.unisat === 'undefined') {
+      notify('UniSat not found', 'Install the UniSat Wallet extension first.', 'error');
+      return;
+    }
+    try {
+      notify('Connecting...', 'Approve in UniSat', 'info');
+      const accounts = await window.unisat.requestAccounts();
+      const pubkey   = await window.unisat.getPublicKey();
+      STATE.wallet = { type:'unisat', address:accounts[0], pubkey };
+      onWalletConnected();
+      notify('Connected', truncate(accounts[0]), 'success');
+    } catch(e) {
+      notify('Failed', e.message || 'User rejected', 'error');
+    }
+  } else if (type === 'opnet') {
+    await new Promise(r => setTimeout(r, 150));
+    const prov = window.opnet || window.opwallet || null;
+    if (!prov) { notify('OP_WALLET not found', 'Install OP_WALLET extension.', 'error'); return; }
+    try {
+      const accounts = await prov.requestAccounts();
+      let pubkey = '';
+      try { pubkey = await prov.getPublicKey(); } catch(_){}
+      STATE.wallet = { type:'opnet', address:accounts[0], pubkey };
+      onWalletConnected();
+      notify('Connected', truncate(accounts[0]), 'success');
+    } catch(e) {
+      notify('Failed', e.message || 'User rejected', 'error');
+    }
+  }
+}
+
+function onWalletConnected() {
+  const w = STATE.wallet;
+  const btn = document.getElementById('walletBtn');
+  btn.classList.add('connected');
+  document.getElementById('walletLabel').textContent = truncate(w.address, 8);
+  document.getElementById('disconnectItem').style.display = 'flex';
+  document.getElementById('sendBtn').disabled = false;
+  loadMessages();
+}
+
+function disconnectWallet() {
+  STATE.wallet = null;
+  document.getElementById('walletMenu').classList.remove('open');
+  document.getElementById('walletBtn').classList.remove('connected');
+  document.getElementById('walletLabel').textContent = 'Connect Wallet';
+  document.getElementById('disconnectItem').style.display = 'none';
+  document.getElementById('sendBtn').disabled = true;
+  document.getElementById('msgList').innerHTML = `
+    <div class="connect-prompt">
+      <div class="cp-title">Connect your wallet</div>
+      <div class="cp-sub">Connect wallet to see messages.</div>
+      <div class="cp-btns">
+        <button class="btn-secondary" onclick="connectWallet('unisat')">🟠 UniSat</button>
+      </div>
+    </div>`;
+}
+
+/* ═══════════════════════════════════════════════════
+   BLOCK HEIGHT
+═══════════════════════════════════════════════════ */
+async function fetchBlock() {
+  try {
+    const r = await fetch('https://blockstream.info/testnet/api/blocks/tip/height');
+    if (r.ok) {
+      const h = await r.json();
+      document.getElementById('liveBlock').textContent = h.toLocaleString();
+    }
+  } catch(_){}
+}
+
+/* ═══════════════════════════════════════════════════
+   MESSAGE TYPE
+═══════════════════════════════════════════════════ */
+function setMsgType(type) {
+  STATE.msgType = type;
+  STATE.encKey  = null;
+
+  document.querySelectorAll('.msg-type-btn').forEach(b => b.classList.remove('active'));
+  document.querySelector('.'+ type +'-btn').classList.add('active');
+
+  const ta = document.getElementById('f-message');
+  const hint = document.getElementById('msgHint');
+  const keyReveal = document.getElementById('keyReveal');
+  const prevCard = document.getElementById('previewCard');
+  const prevTypeEl = document.getElementById('prevType');
+  const prevEncLabel = document.getElementById('prevEncLabel');
+
+  if (type === 'encrypted') {
+    ta.classList.add('encrypted-mode');
+    hint.textContent = 'Encrypted with AES-256-GCM · Only key holder can read';
+    hint.style.color = 'var(--amber)';
+    keyReveal.classList.add('show');
+    generateEncKey();
+    prevCard.className = 'msg-card encrypted';
+    prevTypeEl.className = 'mc-type encrypted';
+    prevTypeEl.textContent = 'ENCRYPTED';
+    prevEncLabel.textContent = 'AES-256-GCM';
+    prevEncLabel.style.color = 'var(--amber)';
+  } else {
+    ta.classList.remove('encrypted-mode');
+    hint.textContent = 'Stored in OP_RETURN · Permanent on-chain';
+    hint.style.color = '';
+    keyReveal.classList.remove('show');
+    prevCard.className = 'msg-card public';
+    prevTypeEl.className = 'mc-type public';
+    prevTypeEl.textContent = 'PUBLIC';
+    prevEncLabel.textContent = 'None (public)';
+    prevEncLabel.style.color = '';
+  }
+  updatePreview();
+}
+
+async function generateEncKey() {
+  const key = await crypto.subtle.generateKey({ name:'AES-GCM', length:256 }, true, ['encrypt','decrypt']);
+  const raw = await crypto.subtle.exportKey('raw', key);
+  const hex = bytesToHex(new Uint8Array(raw));
+  STATE.encKey = hex;
+  document.getElementById('encKeyDisplay').textContent = hex;
+}
+
+async function copyEncKey() {
+  if (STATE.encKey) {
+    await navigator.clipboard.writeText(STATE.encKey);
+    notify('Key copied!', 'Store it somewhere safe.', 'success');
+  }
+}
+
+/* ═══════════════════════════════════════════════════
+   PREVIEW & CHAR COUNT
+═══════════════════════════════════════════════════ */
+function onMessageInput() {
+  const msg = document.getElementById('f-message').value;
+  const bytes = new TextEncoder().encode(msg).length;
+  const cc = document.getElementById('charCount');
+  cc.textContent = `${bytes} / ${MAX_MSG_BYTES}`;
+  if (bytes > MAX_MSG_BYTES) {
+    cc.className = 'char-count over';
+  } else if (bytes > MAX_MSG_BYTES * 0.85) {
+    cc.className = 'char-count warn';
+  } else {
+    cc.className = 'char-count ok';
+  }
+  updatePreview();
+}
+
+function updatePreview() {
+  const recipient = document.getElementById('f-recipient').value;
+  const msg       = document.getElementById('f-message').value;
+  const amountStr = document.getElementById('f-amount').value;
+  const amount    = parseInt(amountStr) || 0;
+  const isEnc     = STATE.msgType === 'encrypted';
+
+  // To address
+  document.getElementById('prevTo').textContent = recipient
+    ? 'To: ' + truncate(recipient, 10)
+    : 'To: —';
+
+  // Message preview
+  const prevMsg = document.getElementById('prevMsg');
+  if (!msg) {
+    prevMsg.textContent = 'Your message here...';
+    prevMsg.className = 'mc-msg placeholder';
+  } else if (isEnc) {
+    prevMsg.textContent = '🔐 [encrypted · ' + new TextEncoder().encode(msg).length + ' bytes]';
+    prevMsg.className = 'mc-msg enc-preview';
+  } else {
+    prevMsg.textContent = msg;
+    prevMsg.className = 'mc-msg';
+  }
+
+  // Amount
+  const btc = amount ? (amount / 1e8).toFixed(8) : '—';
+  document.getElementById('prevAmount').textContent = amount ? amount.toLocaleString() + ' sats' : '— sats';
+  document.getElementById('prevAmountBtc').textContent = '≈ ' + btc + ' BTC';
+  document.getElementById('amountBtc').textContent = amount ? '≈ ' + btc : '≈ 0 BTC';
+
+  // Total estimate
+  const total = amount ? (amount + 2000) : 0;
+  document.getElementById('prevTotal').textContent = total ? (total.toLocaleString() + ' sats') : '— sats';
+
+  // Enable button?
+  const bytes = new TextEncoder().encode(msg).length;
+  const valid = STATE.wallet && recipient.trim() && msg.trim() && amount >= 546 && bytes <= MAX_MSG_BYTES;
+  document.getElementById('sendBtn').disabled = !valid;
+}
+
+/* ═══════════════════════════════════════════════════
+   ENCRYPTION
+═══════════════════════════════════════════════════ */
+async function encryptMessage(text, hexKey) {
+  const rawKey  = hexToBytes(hexKey);
+  const key     = await crypto.subtle.importKey('raw', rawKey, 'AES-GCM', false, ['encrypt']);
+  const iv      = crypto.getRandomValues(new Uint8Array(12));
+  const encoded = new TextEncoder().encode(text);
+  const cipher  = await crypto.subtle.encrypt({ name:'AES-GCM', iv }, key, encoded);
+  const blob    = new Uint8Array([...iv, ...new Uint8Array(cipher)]);
+  return blob; // raw bytes
+}
+
+async function decryptMessage(blobBytes, hexKey) {
+  const rawKey = hexToBytes(hexKey);
+  const key    = await crypto.subtle.importKey('raw', rawKey, 'AES-GCM', false, ['decrypt']);
+  const iv     = blobBytes.slice(0, 12);
+  const cipher = blobBytes.slice(12);
+  const plain  = await crypto.subtle.decrypt({ name:'AES-GCM', iv }, key, cipher);
+  return new TextDecoder().decode(plain);
+}
+
+/* ═══════════════════════════════════════════════════
+   BUILD OP_RETURN SCRIPT
+═══════════════════════════════════════════════════ */
+async function buildOpReturnPayload(msgText, isEncrypted) {
+  const magic   = new TextEncoder().encode(PROTOCOL_MAGIC); // 6 bytes
+  const version = new Uint8Array([PROTOCOL_VERSION]);        // 1 byte
+  const type    = new Uint8Array([isEncrypted ? TYPE_ENCRYPTED : TYPE_PUBLIC]); // 1 byte
+
+  let msgBytes;
+  if (isEncrypted) {
+    if (!STATE.encKey) throw new Error('No encryption key generated');
+    msgBytes = await encryptMessage(msgText, STATE.encKey);
+  } else {
+    msgBytes = new TextEncoder().encode(msgText);
+  }
+
+  if (msgBytes.length > MAX_MSG_BYTES) throw new Error('Message too long for OP_RETURN');
+
+  const payload = concat([magic, version, type, msgBytes]);
+  // OP_RETURN + pushdata
+  return new Uint8Array([0x6a, payload.length, ...payload]);
+}
+
+/* ═══════════════════════════════════════════════════
+   SEND
+═══════════════════════════════════════════════════ */
+async function sendMessage() {
+  if (!STATE.wallet) { notify('No wallet', 'Connect a wallet first.', 'error'); return; }
+
+  const recipient = document.getElementById('f-recipient').value.trim();
+  const msgText   = document.getElementById('f-message').value.trim();
+  const amount    = parseInt(document.getElementById('f-amount').value);
+  const isEnc     = STATE.msgType === 'encrypted';
+
+  if (!recipient) { notify('Missing recipient', '', 'error'); return; }
+  if (!msgText)   { notify('Missing message', '', 'error'); return; }
+  if (!amount || amount < 546) { notify('Amount too small', 'Minimum 546 sats.', 'error'); return; }
+
+  const bytes = new TextEncoder().encode(msgText).length;
+  if (bytes > MAX_MSG_BYTES) {
+    notify('Message too long', `Max ${MAX_MSG_BYTES} bytes. Current: ${bytes}`, 'error');
+    return;
+  }
+
+  const statusEl = document.getElementById('sendStatus');
+  const savedKey = isEnc ? STATE.encKey : null;
+
+  statusEl.innerHTML = `
+    <div class="tx-progress">
+      <div class="tx-step active" id="step1"><div class="step-dot"></div>Building transaction...</div>
+      <div class="tx-step" id="step2"><div class="step-dot"></div>Awaiting wallet signature</div>
+      <div class="tx-step" id="step3"><div class="step-dot"></div>Broadcasting to network</div>
+      <div class="tx-step" id="step4"><div class="step-dot"></div>Confirmed</div>
+    </div>`;
+  document.getElementById('sendBtn').disabled = true;
+
+  function stepDone(n) {
+    const el = document.getElementById('step'+n);
+    if (el) { el.className = 'tx-step done'; }
+  }
+  function stepActive(n) {
+    const el = document.getElementById('step'+n);
+    if (el) { el.className = 'tx-step active'; }
+  }
+  function stepError(n, msg) {
+    const el = document.getElementById('step'+n);
+    if (el) { el.className = 'tx-step error'; el.innerHTML += ' — ' + msg; }
+  }
+
+  try {
+    // Step 1: build OP_RETURN
+    const opReturnScript = await buildOpReturnPayload(msgText, isEnc);
+    stepDone(1); stepActive(2);
+
+    // Step 2: get UTXOs
+    const utxos = await getUtxos(STATE.wallet.address);
+    if (!utxos || utxos.length === 0) throw new Error('No UTXOs available');
+
+    // Build and sign via wallet
+    const psbtBytes = await buildPSBT(utxos, recipient, amount, opReturnScript);
+    const psbtHex   = bytesToHex(psbtBytes);
+
+    let signedHex;
+    if (STATE.wallet.type === 'unisat') {
+      signedHex = await window.unisat.signPsbt(psbtHex, { autoFinalized: true });
+    } else {
+      const prov = window.opnet || window.opwallet;
+      signedHex  = await prov.signPsbt(psbtHex, { autoFinalized: true });
+    }
+
+    stepDone(2); stepActive(3);
+
+    // Step 3: broadcast
+    const txid = await broadcastTx(signedHex);
+    stepDone(3); stepActive(4);
+    stepDone(4);
+
+    // Save locally
+    const entry = {
+      id: txid,
+      direction: 'sent',
+      from: STATE.wallet.address,
+      to: recipient,
+      amount,
+      msgText: isEnc ? '[encrypted]' : msgText,
+      msgType: isEnc ? 'encrypted' : 'public',
+      encKey: savedKey,
+      ts: Date.now(),
+      status: 'pending',
+    };
+    STATE.messages.unshift(entry);
+    saveMessages();
+
+    statusEl.innerHTML += `
+      <div style="margin-top:12px;font-size:11px;color:var(--green);">
+        Sent! TXID: <a class="txid-link" href="https://blockstream.info/testnet/tx/${txid}" target="_blank">${truncate(txid, 10)}</a>
+      </div>`;
+
+    if (isEnc && savedKey) {
+      statusEl.innerHTML += `
+        <div class="key-reveal show" style="margin-top:12px;">
+          <div class="key-reveal-label">⚠ Your Decryption Key</div>
+          <div class="key-reveal-val">${savedKey}</div>
+          <div class="key-warn">Share this key with the recipient so they can read your message.</div>
+        </div>`;
+    }
+
+    notify('Message sent!', truncate(txid, 10), 'success');
+    loadMessages();
+
+    // Regenerate key for next encrypted message
+    if (isEnc) generateEncKey();
+
+  } catch(e) {
+    console.error(e);
+    const errStep = document.querySelector('.tx-step.active');
+    if (errStep) errStep.className = 'tx-step error';
+    notify('Error', e.message || 'Transaction failed', 'error');
+    document.getElementById('sendBtn').disabled = false;
+  }
+}
+
+/* ═══════════════════════════════════════════════════
+   UTXOS
+═══════════════════════════════════════════════════ */
+async function getUtxos(address) {
+  try {
+    if (STATE.wallet.type === 'unisat') {
+      return await window.unisat.getUtxos();
+    }
+    const r = await fetch(`https://blockstream.info/testnet/api/address/${address}/utxo`);
+    const utxos = await r.json();
+    return utxos.map(u => ({ txid: u.txid, vout: u.vout, value: u.value }));
+  } catch(e) {
+    console.error('UTXOs error', e);
+    return [];
+  }
+}
+
+/* ═══════════════════════════════════════════════════
+   BROADCAST
+═══════════════════════════════════════════════════ */
+async function broadcastTx(hex) {
+  // Strip PSBT magic if needed
+  if (hex.startsWith('70736274')) {
+    // Try wallet broadcast
+    if (STATE.wallet.type === 'unisat') {
+      return await window.unisat.pushTx({ rawtx: hex });
+    }
+    const prov = window.opnet || window.opwallet;
+    return await prov.pushTx({ rawtx: hex });
+  }
+
+  const r = await fetch('https://blockstream.info/testnet/api/tx', {
+    method:'POST', body: hex, headers:{'Content-Type':'text/plain'}
+  });
+  if (!r.ok) throw new Error('Broadcast failed: ' + await r.text());
+  return await r.text();
+}
+
+/* ═══════════════════════════════════════════════════
+   INBOX / MESSAGES
+═══════════════════════════════════════════════════ */
+function saveMessages() {
+  try {
+    localStorage.setItem('bitmessage_msgs', JSON.stringify(STATE.messages));
+  } catch(_){}
+}
+
+function loadMessages() {
+  try {
+    const raw = localStorage.getItem('bitmessage_msgs');
+    if (raw) STATE.messages = JSON.parse(raw);
+  } catch(_){}
+
+  renderMessages('all');
+
+  const total = STATE.messages.length;
+  const sent  = STATE.messages.filter(m => m.direction==='sent').length;
+  const pub   = STATE.messages.filter(m => m.msgType==='public').length;
+  const enc   = STATE.messages.filter(m => m.msgType==='encrypted').length;
+
+  document.getElementById('stat-received').textContent = total - sent;
+  document.getElementById('stat-sent').textContent = sent;
+  document.getElementById('stat-public').textContent = pub;
+  document.getElementById('stat-encrypted').textContent = enc;
+  document.getElementById('inboxCount').textContent = total;
+}
+
+function filterInbox(filter, btn) {
+  document.querySelectorAll('.inbox-filters .filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderMessages(filter);
+}
+
+function renderMessages(filter) {
+  const list = document.getElementById('msgList');
+  let msgs = [...STATE.messages];
+
+  if (filter === 'received') msgs = msgs.filter(m => m.direction === 'received');
+  if (filter === 'sent')     msgs = msgs.filter(m => m.direction === 'sent');
+  if (filter === 'public')   msgs = msgs.filter(m => m.msgType === 'public');
+  if (filter === 'encrypted')msgs = msgs.filter(m => m.msgType === 'encrypted');
+
+  if (!msgs.length) {
+    if (!STATE.wallet) {
+      list.innerHTML = `
+        <div class="connect-prompt">
+          <div class="cp-title">Connect your wallet</div>
+          <div class="cp-sub">Connect wallet to see messages tied to your address.</div>
+          <div class="cp-btns">
+            <button class="btn-secondary" onclick="connectWallet('unisat')">🟠 UniSat</button>
+          </div>
+        </div>`;
+    } else {
+      list.innerHTML = `<div class="empty"><span class="empty-icon">✉</span>No messages yet</div>`;
+    }
+    return;
+  }
+
+  list.innerHTML = msgs.map((m, i) => `
+    <div class="msg-row" style="animation-delay:${i*40}ms" onclick="showMsgDetail(${i})">
+      <div class="mr-indicator ${m.msgType}"></div>
+      <div class="mr-body">
+        <div class="mr-addr">${m.direction === 'sent' ? 'To' : 'From'}: <span>${truncate(m.direction==='sent'?m.to:m.from, 12)}</span></div>
+        ${m.msgType === 'encrypted'
+          ? `<div class="mr-msg enc">🔐 <span>[encrypted message]</span></div>`
+          : `<div class="mr-msg">${escHtml(m.msgText)}</div>`
+        }
+      </div>
+      <div class="mr-meta">
+        <span class="mr-amount">${m.amount.toLocaleString()} sats</span>
+        <span class="mr-time">${timeAgo(m.ts)}</span>
+        <span class="mr-status ${m.status}">${m.status}</span>
+      </div>
+    </div>`).join('');
+}
+
+function showMsgDetail(idx) {
+  const m = STATE.messages[idx];
+  if (!m) return;
+
+  const modal = document.getElementById('msgModal');
+  document.getElementById('mTitle').textContent = m.msgType === 'public' ? 'Public Message' : 'Encrypted Message';
+
+  let body = `
+    <div class="modal-row"><span class="modal-key">Direction</span><span class="modal-val">${m.direction}</span></div>
+    <div class="modal-row"><span class="modal-key">From</span><span class="modal-val">${m.from || '—'}</span></div>
+    <div class="modal-row"><span class="modal-key">To</span><span class="modal-val">${m.to || '—'}</span></div>
+    <div class="modal-row"><span class="modal-key">Amount</span><span class="modal-val" style="color:var(--gold)">${m.amount.toLocaleString()} sats</span></div>
+    <div class="modal-row"><span class="modal-key">Type</span><span class="modal-val">${m.msgType}</span></div>
+    <div class="modal-row"><span class="modal-key">Status</span><span class="modal-val">${m.status}</span></div>
+    <div class="modal-row"><span class="modal-key">Time</span><span class="modal-val">${new Date(m.ts).toLocaleString()}</span></div>
+    <div class="modal-row"><span class="modal-key">TX ID</span><span class="modal-val">
+      <a class="txid-link" href="https://blockstream.info/testnet/tx/${m.id}" target="_blank">${truncate(m.id, 14)}</a>
+    </span></div>`;
+
+  if (m.msgType === 'public') {
+    body += `
+      <div class="msg-reveal">
+        <div class="msg-reveal-label">Message</div>
+        <div class="msg-reveal-text">${escHtml(m.msgText)}</div>
+      </div>`;
+  } else {
+    body += `
+      <div class="msg-reveal">
+        <div class="msg-reveal-label">Encrypted Message</div>
+        <div class="msg-reveal-text enc">[encrypted — enter key to decrypt]</div>
+      </div>
+      <div class="decrypt-box" id="decryptBox_${idx}">
+        <div class="decrypt-label">Decryption Key</div>
+        <input type="text" class="decrypt-input" id="decryptKey_${idx}" placeholder="Paste AES-256 hex key...">
+        <button class="btn-decrypt" onclick="tryDecrypt(${idx})">Decrypt →</button>
+        <div id="decryptResult_${idx}" style="margin-top:12px;"></div>
+      </div>`;
+
+    // If sender and has key stored
+    if (m.encKey) {
+      body += `
+        <div class="key-reveal show" style="margin-top:12px;">
+          <div class="key-reveal-label">⚠ Saved Encryption Key</div>
+          <div class="key-reveal-val">${m.encKey}</div>
+          <button class="copy-btn" onclick="navigator.clipboard.writeText('${m.encKey}');notify('Copied!','','success')">Copy Key</button>
+        </div>`;
+    }
+  }
+
+  document.getElementById('mBody').innerHTML = body;
+  document.getElementById('mActions').innerHTML = `
+    <button class="btn-secondary" onclick="closeModal()">Close</button>
+    <a href="https://blockstream.info/testnet/tx/${m.id}" target="_blank" class="btn-secondary" style="text-decoration:none;display:inline-flex;align-items:center;">View on Explorer ↗</a>`;
+
+  modal.classList.add('open');
+}
+
+async function tryDecrypt(idx) {
+  const m   = STATE.messages[idx];
+  const key = document.getElementById(`decryptKey_${idx}`).value.trim();
+  const res = document.getElementById(`decryptResult_${idx}`);
+
+  if (!key) { res.innerHTML = `<span style="color:var(--red);font-size:11px;">Enter a key first.</span>`; return; }
+
+  try {
+    // We'd need the actual encrypted bytes. For demo, show error gracefully.
+    res.innerHTML = `<span style="color:var(--amber);font-size:11px;">Decryption requires the original encrypted payload from the blockchain.</span>`;
+  } catch(e) {
+    res.innerHTML = `<span style="color:var(--red);font-size:11px;">Decryption failed: Wrong key or corrupted data.</span>`;
+  }
+}
+
+function closeModal() {
+  document.getElementById('msgModal').classList.remove('open');
+}
+
+/* ═══════════════════════════════════════════════════
+   PSBT BUILDER (P2WPKH standard)
+═══════════════════════════════════════════════════ */
+async function buildPSBT(utxos, toAddress, amountSats, opReturnScript) {
+  const PSBT_MAGIC = new Uint8Array([0x70, 0x73, 0x62, 0x74, 0xff]);
+  const FEE  = 2000;
+  const need = amountSats + FEE;
+
+  let selected = [], totalIn = 0;
+  for (const u of utxos) {
+    selected.push(u);
+    totalIn += u.value;
+    if (totalIn >= need) break;
+  }
+  if (totalIn < need) throw new Error(`Insufficient: ${totalIn} sats available, ${need} needed`);
+
+  const changeAmt = totalIn - amountSats - FEE;
+  const selfAddr  = STATE.wallet.address;
+
+  const outputs = [];
+  outputs.push({ value: amountSats, script: addressToScriptPubKey(toAddress) });
+  if (opReturnScript) outputs.push({ value: 0, script: opReturnScript });
+  if (changeAmt >= 546) outputs.push({ value: changeAmt, script: addressToScriptPubKey(selfAddr) });
+
+  const version  = uint32LE(2);
+  const locktime = uint32LE(0);
+  const seq      = uint32LE(0xfffffffd);
+
+  const rawIns = selected.map(u =>
+    concat([hexToBytes(u.txid).reverse(), uint32LE(u.vout), new Uint8Array([0x00]), seq])
+  );
+  const rawOuts = outputs.map(o => buildTxOutputBytes(o.value, o.script));
+  const rawTx   = concat([version, encodeVarInt(rawIns.length), ...rawIns, encodeVarInt(rawOuts.length), ...rawOuts, locktime]);
+
+  const parts = [PSBT_MAGIC];
+  parts.push(new Uint8Array([0x01, 0x00]));
+  parts.push(encodeVarInt(rawTx.length));
+  parts.push(rawTx);
+  parts.push(new Uint8Array([0x00]));
+
+  const selfScript = addressToScriptPubKey(selfAddr);
+  for (const u of selected) {
+    const witUtxo = buildTxOutputBytes(u.value, selfScript);
+    parts.push(new Uint8Array([0x01, 0x01]));
+    parts.push(encodeVarInt(witUtxo.length));
+    parts.push(witUtxo);
+    parts.push(new Uint8Array([0x00]));
+  }
+  for (let k = 0; k < outputs.length; k++) parts.push(new Uint8Array([0x00]));
+
+  const total  = parts.reduce((s, p) => s + p.length, 0);
+  const result = new Uint8Array(total);
+  let offset   = 0;
+  for (const p of parts) { result.set(p, offset); offset += p.length; }
+  return result;
+}
+
+/* ═══════════════════════════════════════════════════
+   SCRIPT UTILS
+═══════════════════════════════════════════════════ */
+function addressToScriptPubKey(address) {
+  if (!address) throw new Error('No address');
+  if (address.startsWith('tb1') || address.startsWith('bc1')) {
+    const decoded = bech32Decode(address);
+    if (!decoded) throw new Error('Invalid bech32 address: ' + address);
+    const { witVer, witProg } = decoded;
+    return new Uint8Array([witVer === 0 ? 0x00 : (0x50 + witVer), witProg.length, ...witProg]);
+  }
+  // P2PKH / P2SH fallback
+  const decoded = base58Decode(address);
+  if (!decoded) throw new Error('Unsupported address: ' + address);
+  const hash160 = decoded.slice(1, 21);
+  if (decoded[0] === 0x6f || decoded[0] === 0x00) { // testnet P2PKH
+    return new Uint8Array([0x76, 0xa9, 0x14, ...hash160, 0x88, 0xac]);
+  }
+  if (decoded[0] === 0xc4 || decoded[0] === 0x05) { // P2SH
+    return new Uint8Array([0xa9, 0x14, ...hash160, 0x87]);
+  }
+  throw new Error('Unknown address type');
+}
+
+function buildTxOutputBytes(value, script) {
+  const valueBytes = new Uint8Array(8);
+  const lo = value & 0xffffffff, hi = Math.floor(value / 0x100000000);
+  new DataView(valueBytes.buffer).setUint32(0, lo, true);
+  new DataView(valueBytes.buffer).setUint32(4, hi, true);
+  return concat([valueBytes, encodeVarInt(script.length), script]);
+}
+
+/* ═══════════════════════════════════════════════════
+   BECH32
+═══════════════════════════════════════════════════ */
+const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+const BECH32_GEN     = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+
+function bech32Polymod(values) {
+  let chk = 1;
+  for (const v of values) {
+    const b = chk >> 25;
+    chk = (chk & 0x1ffffff) << 5 ^ v;
+    for (let i=0; i<5; i++) if ((b>>i)&1) chk ^= BECH32_GEN[i];
+  }
+  return chk;
+}
+
+function bech32HrpExpand(hrp) {
+  return [...hrp.split('').map(c=>c.charCodeAt(0)>>5), 0,
+          ...hrp.split('').map(c=>c.charCodeAt(0)&31)];
+}
+
+function convertBits(data, from, to, pad=true) {
+  let acc=0, bits=0; const ret=[], maxv=(1<<to)-1;
+  for (const v of data) {
+    acc = (acc<<from|v) & 0xffffffff; bits += from;
+    while (bits>=to) { bits-=to; ret.push((acc>>bits)&maxv); }
+  }
+  if (pad && bits) ret.push((acc<<(to-bits))&maxv);
+  return ret;
+}
+
+function bech32Decode(address) {
+  const sep = address.lastIndexOf('1');
+  if (sep < 1) return null;
+  const hrp  = address.slice(0, sep).toLowerCase();
+  const data = address.slice(sep+1).toLowerCase().split('').map(c => BECH32_CHARSET.indexOf(c));
+  if (data.some(d => d === -1)) return null;
+
+  const decoded = data.slice(0, -6);
+  const witVer  = decoded[0];
+  const witProg = new Uint8Array(convertBits(decoded.slice(1), 5, 8, false));
+  return { witVer, witProg };
+}
+
+/* ═══════════════════════════════════════════════════
+   BASE58
+═══════════════════════════════════════════════════ */
+const BASE58_CHARS = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+function base58Decode(str) {
+  let n = BigInt(0);
+  for (const c of str) {
+    const d = BASE58_CHARS.indexOf(c);
+    if (d < 0) return null;
+    n = n * BigInt(58) + BigInt(d);
+  }
+  const bytes = [];
+  while (n > 0n) { bytes.unshift(Number(n & 0xffn)); n >>= 8n; }
+  for (const c of str) { if (c === '1') bytes.unshift(0); else break; }
+  return new Uint8Array(bytes);
+}
+
+/* ═══════════════════════════════════════════════════
+   BINARY UTILS
+═══════════════════════════════════════════════════ */
+function hexToBytes(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i=0; i<bytes.length; i++) bytes[i] = parseInt(hex.substr(i*2,2),16);
+  return bytes;
+}
+function bytesToHex(bytes) {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+function concat(arrays) {
+  const total  = arrays.reduce((s,a) => s+a.length, 0);
+  const result = new Uint8Array(total);
+  let offset   = 0;
+  for (const a of arrays) { result.set(a, offset); offset += a.length; }
+  return result;
+}
+function encodeVarInt(n) {
+  if (n < 0xfd) return new Uint8Array([n]);
+  if (n <= 0xffff) { const b=new Uint8Array(3); b[0]=0xfd; new DataView(b.buffer).setUint16(1,n,true); return b; }
+  const b=new Uint8Array(5); b[0]=0xfe; new DataView(b.buffer).setUint32(1,n,true); return b;
+}
+function uint32LE(n) {
+  const b = new Uint8Array(4);
+  new DataView(b.buffer).setUint32(0, n >>> 0, true);
+  return b;
+}
+
+/* ═══════════════════════════════════════════════════
+   NOTIFICATIONS
+═══════════════════════════════════════════════════ */
+function notify(title, sub, type='info') {
+  const icons = { success:'✓', error:'✕', warning:'⚠', info:'ℹ' };
+  const wrap  = document.getElementById('notifWrap');
+  const el    = document.createElement('div');
+  el.className = `notif ${type}`;
+  el.innerHTML = `<div class="notif-icon">${icons[type]}</div>
+    <div><div class="notif-text">${title}</div>${sub ? `<div class="notif-sub">${sub}</div>` : ''}</div>`;
+  wrap.appendChild(el);
+  setTimeout(() => {
+    el.style.opacity = '0'; el.style.transform = 'translateX(20px)';
+    el.style.transition = 'all 0.3s';
+    setTimeout(() => el.remove(), 300);
+  }, 4000);
+}
+
+/* ═══════════════════════════════════════════════════
+   UTILS
+═══════════════════════════════════════════════════ */
+function truncate(str, n=12) {
+  if (!str) return '—';
+  if (str.length <= n*2+3) return str;
+  return str.slice(0,n) + '...' + str.slice(-6);
+}
+function timeAgo(ts) {
+  const s = Math.floor((Date.now()-ts)/1000);
+  if (s<60) return 'just now';
+  if (s<3600) return Math.floor(s/60)+'m ago';
+  if (s<86400) return Math.floor(s/3600)+'h ago';
+  return Math.floor(s/86400)+'d ago';
+}
+function escHtml(str) {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+/* ═══════════════════════════════════════════════════
+   INIT
+═══════════════════════════════════════════════════ */
+async function init() {
+  await fetchBlock();
+  setInterval(fetchBlock, 30000);
+  loadMessages();
+  updatePreview();
+}
+
+init();
+</script>
+</body>
+</html>

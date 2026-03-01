@@ -1264,24 +1264,65 @@ async function sendMessage() {
     const psbtHex  = await buildPsbtHex(utxos, recipient, amount, opReturnPayload, feeRate);
     console.log('[BitMessage] PSBT hex (first 40):', psbtHex.slice(0, 40));
 
-    // Sign — UniSat / OP_NET
-    let signedRaw;
-    const walletProvider = STATE.wallet.type === 'unisat' ? window.unisat : (window.opnet || window.opwallet);
-    signedRaw = await walletProvider.signPsbt(psbtHex, {
-      autoFinalized: true,
-      broadcast: false,
-    });
-    console.log('[BitMessage] signPsbt raw result type:', typeof signedRaw, signedRaw);
-
-    const signedHex = normalizeSignedResult(signedRaw);
-    console.log('[BitMessage] signedHex (first 40):', signedHex ? signedHex.slice(0, 40) : 'null');
-    if (!signedHex) throw new Error('Wallet returned empty result after signing');
-
     stepDone(2); stepActive(3);
 
-    // Step 3: broadcast
-    const txid = await broadcastTx(signedHex);
-    stepDone(3); stepActive(4);
+    // Sign & broadcast via UniSat
+    let txid;
+    const walletProvider = STATE.wallet.type === 'unisat'
+      ? window.unisat
+      : (window.opnet || window.opwallet);
+
+    try {
+      // Approach 1: signAndBroadcastPsbt (some UniSat versions)
+      if (typeof walletProvider.signAndBroadcastPsbt === 'function') {
+        console.log('[BitMessage] using signAndBroadcastPsbt');
+        const res = await walletProvider.signAndBroadcastPsbt(psbtHex);
+        txid = typeof res === 'string' ? res : (res.txid || res.tx || JSON.stringify(res));
+
+      } else {
+        // Approach 2: signPsbt then pushTx
+        console.log('[BitMessage] using signPsbt + pushTx');
+        const signedRaw = await walletProvider.signPsbt(psbtHex, { autoFinalized: true });
+        console.log('[BitMessage] signPsbt result — type:', typeof signedRaw,
+          typeof signedRaw === 'string' ? 'value: ' + signedRaw.slice(0, 40) : JSON.stringify(signedRaw).slice(0, 80));
+
+        // signedRaw MUST be a string for pushTx
+        let signedHex;
+        if (typeof signedRaw === 'string') {
+          signedHex = signedRaw;
+        } else if (signedRaw && typeof signedRaw === 'object') {
+          signedHex = signedRaw.psbtHex || signedRaw.txHex || signedRaw.rawtx || signedRaw.hex || signedRaw.tx;
+          if (!signedHex) {
+            // Last resort: if it has numeric keys it might be a Buffer-like object
+            const arr = Object.values(signedRaw);
+            if (arr.length > 0 && typeof arr[0] === 'number') {
+              signedHex = bytesToHex(new Uint8Array(arr));
+            }
+          }
+        }
+        if (!signedHex) throw new Error('Could not extract hex from signPsbt result: ' + JSON.stringify(signedRaw));
+
+        signedHex = String(signedHex).trim();
+        console.log('[BitMessage] signedHex to broadcast:', signedHex.slice(0, 40));
+
+        // Push — if still PSBT format, use pushPsbt; else broadcast raw
+        if (signedHex.startsWith('70736274')) {
+          console.log('[BitMessage] pushing PSBT via pushTx');
+          const pushRes = await walletProvider.pushTx({ rawtx: signedHex });
+          txid = typeof pushRes === 'string' ? pushRes : (pushRes.txid || pushRes.tx || JSON.stringify(pushRes));
+        } else {
+          console.log('[BitMessage] broadcasting raw tx');
+          txid = await broadcastTx(signedHex);
+        }
+      }
+    } catch (signErr) {
+      console.error('[BitMessage] sign/broadcast error:', signErr);
+      throw signErr;
+    }
+
+    if (!txid || typeof txid !== 'string') throw new Error('No txid returned: ' + JSON.stringify(txid));
+    console.log('[BitMessage] txid:', txid);
+    stepDone(3);
     stepDone(4);
 
     // Save locally
